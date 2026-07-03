@@ -1663,7 +1663,7 @@ function exportSite(){
       if(rPreview) rPreview.className     = prevRPreview;
       if(notifBar) notifBar.className     = prevNotif;
       var seedJson=JSON.stringify(d);
-      html=html.replace('var __SEED__=null;','var __SEED__='+seedJson+';');
+      html=html.replace('var __SEED__={"anatomy":{"_n":"Anatomy","year_1":{"_n":"Year 1","module_1":{"_n":"Module 1","upper_limb":{"_n":"Upper Limb","qc":6,"qs":[{"question":"Which muscle is the chief flexor of the elbow?","options":["Brachialis","Biceps brachii","Brachioradialis","Pronator teres"],"correct":"A"},{"question":"The musculocutaneous nerve is a branch of which cord?","options":["Medial cord","Lateral cord","Posterior cord","Medial and lateral cords"],"correct":"B"},{"question":"Which nerve is injured in fracture of surgical neck of humerus?","options":["Radial nerve","Axillary nerve","Musculocutaneous nerve","Median nerve"],"correct":"B"},{"question":"The anatomical snuffbox is bounded laterally by:","options":["Extensor pollicis longus","Extensor pollicis brevis","Abductor pollicis longus","Both B and C"],"correct":"D"},{"question":"Which structure passes through the carpal tunnel?","options":["Ulnar nerve","Radial artery","Median nerve","Ulnar artery"],"correct":"C"},{"question":"Erb's palsy results from injury to roots:","options":["C8, T1","C5, C6","C7, C8","C6, C7"],"correct":"B"}]}}}}};','var __SEED__='+seedJson+';');
       var blob=new Blob([html],{type:'text/html;charset=utf-8'});
       var a=document.createElement('a');
       a.href=URL.createObjectURL(blob);
