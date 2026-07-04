@@ -492,7 +492,7 @@ body{
     <div style="font-weight:700;font-size:15px;color:var(--text);text-align:center">أدخل كلمة السر</div>
     <div style="font-size:13px;color:var(--dim);text-align:center">أدخل الرقم السري</div>
     <input id="pin-inp" type="password" inputmode="numeric" style="background:var(--inp);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:16px;letter-spacing:4px;text-align:center;outline:none;width:100%" placeholder="••••" onkeydown="if(event.key==='Enter')checkPin()">
-    <div id="pin-err" style="color:var(--red);font-size:12px;text-align:center;display:none">❌ رقم سري خاطئ</div>
+    <div id="pin-err" style="color: var(--red); font-size: 12px; text-align: center; display: block;">❌ رقم سري خاطئ</div>
     <div style="display:flex;gap:8px">
       <button onclick="checkPin()" style="flex:1;background:var(--blue);border:none;color:#fff;padding:9px;border-radius:9px;cursor:pointer;font-size:14px;font-family:inherit">تأكيد</button>
       <button onclick="closePinModal()" style="flex:1;background:var(--rbtn);border:none;color:var(--text);padding:9px;border-radius:9px;cursor:pointer;font-size:14px;font-family:inherit">إلغاء</button>
@@ -1536,7 +1536,7 @@ var ADMIN_PIN_HASH = 'a6d5b367b292bf716bfcdcb373595cffcc4252c5290701f7dcb264ae66
 // إعدادات GitHub مشفّرة بـ AES-256-GCM بكلمة السر — لا تُقرأ بدونها
 var GH_ENCRYPTED   = '';
 // رقم إصدار الملف — يُحدَّث تلقائياً عند كل نشر أو تصدير
-var APP_VERSION='1783190550360';
+var APP_VERSION='1783192867726';
 // كلمة السر في الذاكرة فقط — تُمسح بمجرد تسجيل الخروج
 var _adminPassphrase = '';
 
