@@ -1,0 +1,84 @@
+name: نشر الموقع على GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:   # تشغيل يدوي من واجهة GitHub
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: سحب الكود
+        uses: actions/checkout@v4
+
+      - name: تنظيف البيانات الحساسة ونشر index.html فقط
+        run: |
+          python3 - << 'PYEOF'
+          import re, os, sys, shutil
+
+          src = "index.html"
+          if not os.path.exists(src):
+              print(f"❌ الملف {src} غير موجود في رووت الريبوزيتوري")
+              sys.exit(1)
+
+          with open(src, "r", encoding="utf-8") as f:
+              html = f.read()
+
+          original = html
+
+          # مسح قيمة GH_ENCRYPTED — يدعم var/let/const وكل أنواع التنسيق
+          # النمط يتعامل مع: var/let/const، مسافات متعددة، علامات اقتباس مفردة ومزدوجة
+          patterns = [
+              # var/let/const GH_ENCRYPTED = '...'
+              r"""((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*')((?:[^'\\]|\\.)*)('(?:\s*;)?)""",
+              # var/let/const GH_ENCRYPTED = "..."
+              r'''((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*")((?:[^"\\]|\\.)*)(")''',
+          ]
+
+          found = False
+          for pat in patterns:
+              new_html, count = re.subn(pat, r"\g<1>\g<3>", html, flags=re.DOTALL)
+              if count > 0:
+                  html = new_html
+                  found = True
+                  print(f"✅ تم مسح GH_ENCRYPTED ({count} تكرار)")
+
+          if not found:
+              print("ℹ️  لم يُعثر على قيمة في GH_ENCRYPTED — الملف ربما نظيف مسبقاً")
+
+          # التحقق الصارم: لا يجب أن تبقى أي قيمة
+          leak_check = re.search(
+              r"""(?:var|let|const)\s+GH_ENCRYPTED\s*=\s*(?:'[^']{4,}'|"[^"]{4,}")""",
+              html, re.DOTALL
+          )
+          if leak_check:
+              print("❌ خطأ حرج: لا تزال توجد قيمة غير فارغة في GH_ENCRYPTED!")
+              print("   الجزء المكتشف:", repr(leak_check.group(0)[:80]))
+              sys.exit(1)
+          else:
+              print("✅ التحقق اجتاز — لا توجد بيانات حساسة في الملف")
+
+          # حفظ النسخة النظيفة في مجلد مؤقت منفصل (فقط index.html)
+          out_dir = "_clean_deploy"
+          os.makedirs(out_dir, exist_ok=True)
+          with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
+              f.write(html)
+
+          print(f"📦 الملف النظيف جاهز في {out_dir}/index.html")
+          PYEOF
+
+      - name: نشر index.html النظيف على gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_clean_deploy
+          publish_branch: gh-pages
+          commit_message: "🚀 نشر آمن — ${{ github.sha }}"
+          force_orphan: false
+          keep_files: false
