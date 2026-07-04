@@ -20,7 +20,7 @@ jobs:
       - name: تنظيف البيانات الحساسة ونشر index.html فقط
         run: |
           python3 - << 'PYEOF'
-          import re, os, sys, shutil
+          import re, os, sys, shutil, time
 
           src = "index.html"
           if not os.path.exists(src):
@@ -51,6 +51,20 @@ jobs:
 
           if not found:
               print("ℹ️  لم يُعثر على قيمة في GH_ENCRYPTED — الملف ربما نظيف مسبقاً")
+
+          # ── التعديل الجديد: تحديث APP_VERSION ──────────────────────────
+          # يجبر متصفح الطالب على تحميل النسخة الجديدة تلقائياً عند كل نشر
+          timestamp = str(int(time.time() * 1000))
+          html, count_ver = re.subn(
+              r"""((?:var|let|const)\s+APP_VERSION\s*=\s*['"])[^'"]*(['"])""",
+              r"\g<1>" + timestamp + r"\g<2>",
+              html
+          )
+          if count_ver:
+              print(f"✅ تم تحديث APP_VERSION إلى {timestamp}")
+          else:
+              print("⚠️  لم يُعثر على APP_VERSION")
+          # ────────────────────────────────────────────────────────────────
 
           # التحقق الصارم: لا يجب أن تبقى أي قيمة
           leak_check = re.search(
