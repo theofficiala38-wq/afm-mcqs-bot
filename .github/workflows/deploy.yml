@@ -79,6 +79,19 @@ jobs:
               print("ℹ️  no-cache headers موجودة مسبقاً")
           # ────────────────────────────────────────────────────────────────
 
+          # ── إلغاء Service Worker القديم عند الطلاب ──────────────────────
+          sw_reset = (
+              '<script>'
+              'if("serviceWorker"in navigator){'
+              'navigator.serviceWorker.getRegistrations()'
+              '.then(function(regs){regs.forEach(function(r){r.unregister();});});}'
+              '</script>'
+          )
+          if '__swCleared' not in html:
+              html = html.replace('</body>', sw_reset + '</body>', 1)
+              print("✅ تمت إضافة Service Worker reset")
+          # ────────────────────────────────────────────────────────────────
+
           # التحقق الصارم: لا يجب أن تبقى أي قيمة
           leak_check = re.search(
               r"""(?:var|let|const)\s+GH_ENCRYPTED\s*=\s*(?:'[^']{4,}'|"[^"]{4,}")""",
