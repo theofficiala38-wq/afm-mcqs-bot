@@ -32,15 +32,11 @@ jobs:
 
           original = html
 
-          # مسح قيمة GH_ENCRYPTED — يدعم var/let/const وكل أنواع التنسيق
-          # النمط يتعامل مع: var/let/const، مسافات متعددة، علامات اقتباس مفردة ومزدوجة
+          # مسح قيمة GH_ENCRYPTED
           patterns = [
-              # var/let/const GH_ENCRYPTED = '...'
               r"""((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*')((?:[^'\\]|\\.)*)('(?:\s*;)?)""",
-              # var/let/const GH_ENCRYPTED = "..."
               r'''((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*")((?:[^"\\]|\\.)*)(")''',
           ]
-
           found = False
           for pat in patterns:
               new_html, count = re.subn(pat, r"\g<1>\g<3>", html, flags=re.DOTALL)
@@ -48,12 +44,10 @@ jobs:
                   html = new_html
                   found = True
                   print(f"✅ تم مسح GH_ENCRYPTED ({count} تكرار)")
-
           if not found:
-              print("ℹ️  لم يُعثر على قيمة في GH_ENCRYPTED — الملف ربما نظيف مسبقاً")
+              print("ℹ️  لم يُعثر على قيمة في GH_ENCRYPTED")
 
-          # ── التعديل الجديد: تحديث APP_VERSION ──────────────────────────
-          # يجبر متصفح الطالب على تحميل النسخة الجديدة تلقائياً عند كل نشر
+          # تحديث APP_VERSION
           timestamp = str(int(time.time() * 1000))
           html, count_ver = re.subn(
               r"""((?:var|let|const)\s+APP_VERSION\s*=\s*['"])[^'"]*(['"])""",
@@ -64,9 +58,8 @@ jobs:
               print(f"✅ تم تحديث APP_VERSION إلى {timestamp}")
           else:
               print("⚠️  لم يُعثر على APP_VERSION")
-          # ────────────────────────────────────────────────────────────────
 
-          # ── منع الـ cache في متصفح الطلاب ───────────────────────────────
+          # منع الـ cache
           no_cache = (
               '<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">\n'
               '    <meta http-equiv="Pragma" content="no-cache">\n'
@@ -75,50 +68,71 @@ jobs:
           if 'Cache-Control' not in html:
               html = html.replace('<head>', '<head>\n    ' + no_cache, 1)
               print("✅ تمت إضافة no-cache headers")
-          else:
-              print("ℹ️  no-cache headers موجودة مسبقاً")
-          # ────────────────────────────────────────────────────────────────
 
-          # ── إلغاء Service Worker القديم عند الطلاب ──────────────────────
-          sw_reset = (
+          # ── إلغاء Service Worker عند جميع الأجهزة ────────────────────────
+          # يُضاف قبل </head> مباشرةً ليُنفَّذ قبل أي كود آخر
+          sw_kill = (
               '<script>'
               'if("serviceWorker"in navigator){'
-              'navigator.serviceWorker.getRegistrations()'
-              '.then(function(regs){regs.forEach(function(r){r.unregister();});});}'
+              'navigator.serviceWorker.getRegistrations().then(function(r){'
+              'r.forEach(function(sw){sw.unregister();});'
+              '});'
+              # إزالة الـ cache الخاص بالـ Service Worker أيضاً
+              'if(window.caches){'
+              'caches.keys().then(function(k){k.forEach(function(n){caches.delete(n);});});'
+              '}}'
               '</script>'
           )
-          if '__swCleared' not in html:
-              html = html.replace('</body>', sw_reset + '</body>', 1)
-              print("✅ تمت إضافة Service Worker reset")
+          html = html.replace('</head>', sw_kill + '\n</head>', 1)
+          print("✅ تمت إضافة Service Worker killer")
           # ────────────────────────────────────────────────────────────────
 
-          # التحقق الصارم: لا يجب أن تبقى أي قيمة
+          # التحقق النهائي
           leak_check = re.search(
               r"""(?:var|let|const)\s+GH_ENCRYPTED\s*=\s*(?:'[^']{4,}'|"[^"]{4,}")""",
               html, re.DOTALL
           )
           if leak_check:
               print("❌ خطأ حرج: لا تزال توجد قيمة غير فارغة في GH_ENCRYPTED!")
-              print("   الجزء المكتشف:", repr(leak_check.group(0)[:80]))
               sys.exit(1)
           else:
-              print("✅ التحقق اجتاز — لا توجد بيانات حساسة في الملف")
+              print("✅ التحقق اجتاز — الملف نظيف")
 
-          # حفظ النسخة النظيفة في مجلد مؤقت منفصل (فقط index.html)
+          # ── إنشاء sw.js يلغي نفسه (يستبدل السيرفس ووركر القديم) ──────────
+          sw_content = (
+              "// Service Worker يلغي نفسه لإجبار المتصفح على تحميل النسخة الجديدة\n"
+              "self.addEventListener('install', function() { self.skipWaiting(); });\n"
+              "self.addEventListener('activate', function() {\n"
+              "  self.registration.unregister().then(function() {\n"
+              "    return self.clients.matchAll({ type: 'window' });\n"
+              "  }).then(function(clients) {\n"
+              "    clients.forEach(function(c) { c.navigate(c.url); });\n"
+              "  });\n"
+              "});\n"
+          )
+
           out_dir = "_clean_deploy"
           os.makedirs(out_dir, exist_ok=True)
+
           with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
               f.write(html)
 
-          print(f"📦 الملف النظيف جاهز في {out_dir}/index.html")
+          # نكتب sw.js في أكثر من مسار شائع لضمان الإلغاء
+          for sw_path in ["sw.js", "service-worker.js", "serviceworker.js"]:
+              with open(os.path.join(out_dir, sw_path), "w", encoding="utf-8") as f:
+                  f.write(sw_content)
+          print("✅ تم إنشاء ملفات sw.js للقضاء على السيرفس ووركر القديم")
+          # ────────────────────────────────────────────────────────────────
+
+          print(f"📦 الملف النظيف جاهز في {out_dir}/")
           PYEOF
 
-      - name: نشر index.html النظيف على gh-pages
+      - name: نشر على gh-pages (حذف القديم كامل وبدء من الصفر)
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./_clean_deploy
           publish_branch: gh-pages
           commit_message: "🚀 نشر آمن — ${{ github.sha }}"
-          force_orphan: false
+          force_orphan: true
           keep_files: false
