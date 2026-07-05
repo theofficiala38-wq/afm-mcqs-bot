@@ -26,43 +26,43 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Clean and Prepare Files
+      - name: Setup Deployment Folder
+        run: |
+          mkdir -p _clean_deploy
+          # نسخ كل الملفات عدا المجلدات غير الضرورية
+          cp -r ./* _clean_deploy/
+          rm -rf _clean_deploy/_clean_deploy
+          rm -rf _clean_deploy/.git
+          rm -rf _clean_deploy/.github
+
+      - name: Clean and Prepare index.html
         run: |
           python3 - << 'PYEOF'
-          import re, os, sys, time
+          import re, os, time
 
-          src = "index.html"
-          if not os.path.exists(src):
-              print(f"❌ الملف {src} غير موجود")
-              sys.exit(1)
-
+          src = "_clean_deploy/index.html"
           with open(src, "r", encoding="utf-8") as f:
               html = f.read()
 
-          # 1. إزالة GH_ENCRYPTED
-          patterns = [
-              r"""((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*')((?:[^'\\]|\\.)*)('(?:\s*;)?)\s*""",
-              r'((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*")((?:[^"\\]|\\.)*)("(?:\s*;)?)\s*'
-          ]
-          for pat in patterns:
-              html, _ = re.subn(pat, r"\g<1>\g<3>", html, flags=re.DOTALL)
+          # 1. إزالة GH_ENCRYPTED (بشكل أكثر دقة)
+          html = re.sub(r"(var|let|const)\s+GH_ENCRYPTED\s*=\s*['\"].*?['\"](\s*;)?", r"\1 GH_ENCRYPTED = ''\2", html)
 
           # 2. تحديث APP_VERSION
           timestamp = str(int(time.time() * 1000))
-          html, _ = re.subn(
-              r"""((?:var|let|const)\s+APP_VERSION\s*=\s*['"])[^'"]*(['"])""",
-              r"\g<1>" + timestamp + r"\g<2>",
-              html
-          )
+          html = re.sub(r"((?:var|let|const)\s+APP_VERSION\s*=\s*['\"])[^'\"]*(['\"])", r"\g<1>" + timestamp + r"\g<2>", html)
 
-          # 3. إعدادات الـ Cache
-          no_cache = '<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">\n    <meta http-equiv="Pragma" content="no-cache">\n    <meta http-equiv="Expires" content="0">'
-          if 'Cache-Control' not in html:
-              html = html.replace('<head>', '<head>\n    ' + no_cache, 1)
+          # 3. إزالة أي سكربت SW قديم
+          html = re.sub(r'<script src=["\']sw-reg\.js\?v=.*?["\']></script>', '', html)
+          
+          # 4. إضافة رابط لملف التسجيل الخارجي قبل </body>
+          reg_tag = f'<script src="sw-reg.js?v={timestamp}"></script>'
+          html = html.replace('</body>', reg_tag + '\n</body>')
 
-          # 4. معالجة Service Worker
-          html = re.sub(r'<script>[^<]*serviceWorker[^<]*</script>\n?', '', html)
-          sw_script = f"""<script>
+          with open(src, "w", encoding="utf-8") as f:
+              f.write(html)
+
+          # 5. إنشاء ملف التسجيل الخارجي (sw-reg.js)
+          reg_content = f"""
           if ('serviceWorker' in navigator) {{
             navigator.serviceWorker.register('sw.js?v={timestamp}')
               .then(reg => {{
@@ -76,23 +76,26 @@ jobs:
                 }};
               }});
           }}
-          </script>"""
-          html = html.replace('</body>', sw_script + '\n</body>')
+          """
+          with open("_clean_deploy/sw-reg.js", "w", encoding="utf-8") as f:
+              f.write(reg_content)
 
-          # 5. إنشاء sw.js
-          sw_content = (
-              f"// {timestamp}\nvar SW_VERSION='{timestamp}';\n"
-              "self.addEventListener('install',e=>e.waitUntil(self.skipWaiting()));\n"
-              "self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(k=>Promise.all(k.map(c=>caches.delete(c)))).then(()=>self.clients.claim())));\n"
-              "self.addEventListener('fetch',e=>{if(e.request.mode==='navigate')e.respondWith(fetch(e.request,{cache:'no-store'}).catch(()=>caches.match(e.request)||new Response('Offline',{status:503})));});"
-          )
-
-          out_dir = "_clean_deploy"
-          os.makedirs(out_dir, exist_ok=True)
-          with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
-          with open(os.path.join(out_dir, "sw.js"), "w", encoding="utf-8") as f: f.write(sw_content)
-          with open(os.path.join(out_dir, ".nojekyll"), "w") as f: f.write("")
-          print("✅ Files prepared")
+          # 6. إنشاء ملف الـ Service Worker (sw.js)
+          sw_content = f"""
+          var SW_VERSION='{timestamp}';
+          self.addEventListener('install', e => e.waitUntil(self.skipWaiting()));
+          self.addEventListener('activate', e => e.waitUntil(caches.keys().then(k => Promise.all(k.map(c => caches.delete(c)))).then(() => self.clients.claim())));
+          self.addEventListener('fetch', e => {{
+            if (e.request.mode === 'navigate') {{
+              e.respondWith(fetch(e.request, {{cache:'no-store'}}).catch(() => caches.match(e.request) || new Response('Offline', {{status:503}})));
+            }}
+          }});
+          """
+          with open("_clean_deploy/sw.js", "w", encoding="utf-8") as f:
+              f.write(sw_content)
+              
+          with open("_clean_deploy/.nojekyll", "w") as f:
+              f.write("")
           PYEOF
 
       - name: Setup Pages
