@@ -59,7 +59,7 @@ jobs:
           else:
               print("⚠️  لم يُعثر على APP_VERSION")
 
-          # منع الـ cache
+          # منع الـ cache على مستوى الـ meta tags
           no_cache = (
               '<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">\n'
               '    <meta http-equiv="Pragma" content="no-cache">\n'
@@ -69,25 +69,32 @@ jobs:
               html = html.replace('<head>', '<head>\n    ' + no_cache, 1)
               print("✅ تمت إضافة no-cache headers")
 
-          # ── إلغاء Service Worker عند جميع الأجهزة ────────────────────────
-          # يُضاف قبل </head> مباشرةً ليُنفَّذ قبل أي كود آخر
-          sw_kill = (
+          # ── إزالة أي سكريبت SW قديم (killer أو registration) لتجنّب التكرار ──
+          html = re.sub(r'<script>[^<]*serviceWorker[^<]*</script>\n?', '', html)
+          print("✅ تم تنظيف أي SW script قديم")
+
+          # ── تسجيل Service Worker (network-first — يجيب HTML دايماً طازج) ──────
+          sw_register = (
               '<script>'
-              'if("serviceWorker"in navigator){'
-              'navigator.serviceWorker.getRegistrations().then(function(r){'
-              'r.forEach(function(sw){sw.unregister();});'
-              '});'
-              # إزالة الـ cache الخاص بالـ Service Worker أيضاً
-              'if(window.caches){'
-              'caches.keys().then(function(k){k.forEach(function(n){caches.delete(n);});});'
-              '}}'
+              "if('serviceWorker'in navigator){"
+              "navigator.serviceWorker.register('sw.js',{scope:'./'}).then(function(r){"
+              "r.addEventListener('updatefound',function(){"
+              "var nw=r.installing;"
+              "nw.addEventListener('statechange',function(){"
+              "if(nw.state==='activated'&&navigator.serviceWorker.controller){"
+              "window.location.reload();}"
+              "});});})"
+              ".catch(function(){});"
+              "var refreshing=false;"
+              "navigator.serviceWorker.addEventListener('controllerchange',function(){"
+              "if(!refreshing){refreshing=true;window.location.reload();}"
+              "});}"
               '</script>'
           )
-          html = html.replace('</head>', sw_kill + '\n</head>', 1)
-          print("✅ تمت إضافة Service Worker killer")
-          # ────────────────────────────────────────────────────────────────
+          html = html.replace('</head>', sw_register + '\n</head>', 1)
+          print("✅ تمت إضافة Service Worker registration")
 
-          # التحقق النهائي
+          # التحقق النهائي من عدم تسرّب التوكن
           leak_check = re.search(
               r"""(?:var|let|const)\s+GH_ENCRYPTED\s*=\s*(?:'[^']{4,}'|"[^"]{4,}")""",
               html, re.DOTALL
@@ -98,16 +105,35 @@ jobs:
           else:
               print("✅ التحقق اجتاز — الملف نظيف")
 
-          # ── إنشاء sw.js يلغي نفسه (يستبدل السيرفس ووركر القديم) ──────────
+          # ── sw.js — Network-First Service Worker ────────────────────────────
+          # يجبر المتصفح يجيب صفحة الـ HTML دايماً من النت (مش من الكاش)
+          # ده بيضمن إن كل مستخدم يشوف آخر تحديث فوراً بعد النشر
           sw_content = (
-              "// Service Worker يلغي نفسه لإجبار المتصفح على تحميل النسخة الجديدة\n"
-              "self.addEventListener('install', function() { self.skipWaiting(); });\n"
-              "self.addEventListener('activate', function() {\n"
-              "  self.registration.unregister().then(function() {\n"
-              "    return self.clients.matchAll({ type: 'window' });\n"
-              "  }).then(function(clients) {\n"
-              "    clients.forEach(function(c) { c.navigate(c.url); });\n"
-              "  });\n"
+              "// Network-First SW — الـ HTML دايماً من النت مش من الكاش\n"
+              f"var SW_VERSION='{timestamp}';\n"
+              "self.addEventListener('install',function(e){\n"
+              "  // تفعيل فوري بدون انتظار الـ tabs القديمة تتقفل\n"
+              "  e.waitUntil(self.skipWaiting());\n"
+              "});\n"
+              "self.addEventListener('activate',function(e){\n"
+              "  // استحواذ فوري على كل الصفحات المفتوحة\n"
+              "  e.waitUntil(\n"
+              "    caches.keys().then(function(keys){\n"
+              "      return Promise.all(keys.map(function(k){return caches.delete(k);}));\n"
+              "    }).then(function(){return self.clients.claim();})\n"
+              "  );\n"
+              "});\n"
+              "self.addEventListener('fetch',function(e){\n"
+              "  // طلبات التنقل (HTML) → دايماً من النت\n"
+              "  if(e.request.mode==='navigate'){\n"
+              "    e.respondWith(\n"
+              "      fetch(e.request,{cache:'no-cache'})\n"
+              "        .catch(function(){\n"
+              "          return caches.match(e.request)||new Response('Offline',{status:503});\n"
+              "        })\n"
+              "    );\n"
+              "  }\n"
+              "  // باقي الموارد → اتركها للمتصفح\n"
               "});\n"
           )
 
@@ -117,12 +143,11 @@ jobs:
           with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
               f.write(html)
 
-          # نكتب sw.js في أكثر من مسار شائع لضمان الإلغاء
-          for sw_path in ["sw.js", "service-worker.js", "serviceworker.js"]:
+          # نكتب sw.js في المسارات الشائعة كلها
+          for sw_path in ["sw.js", "service-worker.js"]:
               with open(os.path.join(out_dir, sw_path), "w", encoding="utf-8") as f:
                   f.write(sw_content)
-          print("✅ تم إنشاء ملفات sw.js للقضاء على السيرفس ووركر القديم")
-          # ────────────────────────────────────────────────────────────────
+          print("✅ تم إنشاء sw.js (network-first) لضمان رؤية التحديثات فوراً")
 
           print(f"📦 الملف النظيف جاهز في {out_dir}/")
           PYEOF
