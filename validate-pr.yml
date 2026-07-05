@@ -1,0 +1,59 @@
+name: 🔍 فحص Pull Request
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "index.html"
+
+jobs:
+  validate-pr:
+    name: 🔍 فحص الملف قبل الدمج
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: 📦 فحص الحجم
+        run: |
+          SIZE=$(wc -c < index.html)
+          echo "📦 الحجم: ${SIZE} بايت"
+          if [ "$SIZE" -lt 51200 ]; then
+            echo "❌ الملف صغير جداً — تأكد من استخدام 'نشر على GitHub' من التطبيق"
+            exit 1
+          fi
+          echo "✅ الحجم مقبول"
+
+      - name: 📚 فحص الأسئلة (__SEED__)
+        run: |
+          if grep -q "var __SEED__=null;" index.html; then
+            echo "❌ الملف لا يحتوي أسئلة (__SEED__ = null)"
+            echo "   افتح التطبيق ← أضف أسئلتك ← 'نشر على GitHub'"
+            exit 1
+          fi
+          echo "✅ الملف يحتوي أسئلة"
+
+      - name: 🔍 فحص بنية التطبيق
+        run: |
+          FAILED=0
+          for marker in "AFM MCQs BOT" "APP_VERSION" "publishToGitHub"; do
+            if grep -q "$marker" index.html; then
+              echo "✅ $marker"
+            else
+              echo "❌ مفقود: $marker"
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" -eq 1 ] && exit 1
+          echo "✅ البنية سليمة"
+
+      - name: 📊 ملخص
+        run: |
+          VER=$(grep -oE "APP_VERSION='[^']*'" index.html | head -1 | grep -oE "'[^']*'" | tr -d "'" || echo "")
+          echo "✅ الملف جاهز للدمج"
+          echo "🏷️  APP_VERSION: ${VER}"
+          echo "📦 الحجم: $(wc -c < index.html) بايت"

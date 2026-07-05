@@ -1,0 +1,173 @@
+name: 🚀 Deploy AFM MCQs BOT
+
+# ══════════════════════════════════════════════════════════════════
+#  يُشغَّل فقط عند رفع index.html (عبر زر "نشر على GitHub" أو يدوياً)
+#  ⚠️  النشر يُوقَف تلقائياً إذا كان الملف بدون أسئلة (__SEED__=null)
+# ══════════════════════════════════════════════════════════════════
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "index.html"
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: "نشر بالقوة حتى لو __SEED__ فارغ (للإعداد الأول فقط)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  # ════════════════════════════════════════════════════════════════
+  #  JOB 1 — فحص الملف (يوقف النشر إذا الملف بدون أسئلة)
+  # ════════════════════════════════════════════════════════════════
+  validate:
+    name: ✅ فحص الملف قبل النشر
+    runs-on: ubuntu-latest
+    outputs:
+      has_questions: ${{ steps.seed_check.outputs.has_questions }}
+      app_version: ${{ steps.seed_check.outputs.app_version }}
+      file_size: ${{ steps.seed_check.outputs.file_size }}
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. حجم الملف ─────────────────────────────────────────────
+      - name: 📦 فحص حجم الملف
+        run: |
+          if [ ! -f "index.html" ]; then
+            echo "❌ index.html غير موجود!"
+            exit 1
+          fi
+          SIZE=$(wc -c < index.html)
+          echo "📦 الحجم: ${SIZE} بايت"
+          if [ "$SIZE" -lt 51200 ]; then
+            echo "❌ الملف صغير جداً (${SIZE} بايت) — يبدو ملفاً فارغاً أو ناقصاً"
+            echo "   استخدم زر 'نشر على GitHub' من داخل التطبيق وليس رفع ملف يدوي"
+            exit 1
+          fi
+          echo "✅ الحجم مقبول"
+
+      # ── 2. فحص وجود الأسئلة (الأهم) ─────────────────────────────
+      - name: 📚 فحص الأسئلة (__SEED__)
+        id: seed_check
+        run: |
+          SIZE=$(wc -c < index.html)
+          echo "file_size=${SIZE}" >> $GITHUB_OUTPUT
+
+          # استخراج APP_VERSION من الملف
+          APP_VER=$(grep -oE "APP_VERSION='[^']*'" index.html | head -1 | grep -oE "'[^']*'" | tr -d "'" || echo "")
+          echo "app_version=${APP_VER}" >> $GITHUB_OUTPUT
+          echo "🏷️  APP_VERSION: '${APP_VER}'"
+
+          # ── الفحص الأهم: هل __SEED__ فارغ؟ ──
+          if grep -q "var __SEED__=null;" index.html; then
+            echo "has_questions=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⛔  الملف لا يحتوي على أسئلة (__SEED__ = null)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "📋 السبب المحتمل:"
+            echo "   • تم رفع الملف الأصلي (template) بدلاً من الملف المُصدَّر"
+            echo "   • أو تم النشر بعد مسح localStorage"
+            echo ""
+            echo "✅ الحل: افتح التطبيق على المتصفح ← أضف أسئلتك ← 'نشر على GitHub'"
+            echo ""
+
+            # وقف النشر إلا إذا تم تجاوز القيد يدوياً
+            FORCE="${{ github.event.inputs.force_deploy }}"
+            if [ "$FORCE" = "true" ]; then
+              echo "⚠️  النشر بالقوة مُفعَّل — سيُنشر الملف بدون أسئلة (إعداد أول)"
+            else
+              echo "🚫 النشر مُوقَف لحماية المستخدمين من رؤية موقع فارغ"
+              echo "   لتجاوز هذا القيد: شغّل الـ workflow يدوياً وفعّل 'force_deploy'"
+              exit 1
+            fi
+          else
+            echo "has_questions=true" >> $GITHUB_OUTPUT
+            # تقدير عدد الأسئلة من حجم __SEED__
+            SEED_SIZE=$(grep -oE "var __SEED__=\{.*" index.html | wc -c 2>/dev/null || echo "0")
+            echo "✅ الملف يحتوي أسئلة مضمّنة (حجم البيانات: ~${SEED_SIZE} حرف)"
+          fi
+
+      # ── 3. فحص بنية HTML ──────────────────────────────────────────
+      - name: 🔍 فحص بنية التطبيق
+        run: |
+          FAILED=0
+          for marker in "AFM MCQs BOT" "APP_VERSION" "publishToGitHub" "toggleTheme" "no-cache"; do
+            if grep -q "$marker" index.html; then
+              echo "✅ $marker"
+            else
+              echo "❌ مفقود: $marker"
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" -eq 1 ] && exit 1
+          echo "✅ بنية التطبيق سليمة"
+
+  # ════════════════════════════════════════════════════════════════
+  #  JOB 2 — النشر على GitHub Pages
+  # ════════════════════════════════════════════════════════════════
+  deploy:
+    name: 🚀 النشر على GitHub Pages
+    runs-on: ubuntu-latest
+    needs: validate
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── ⚠️ لا نلمس APP_VERSION إطلاقاً ──────────────────────────
+      # publishToGitHub في التطبيق يضبطها بشكل صحيح
+      # أي تغيير هنا سيسبب localStorage.clear() عند جميع المستخدمين!
+      - name: ℹ️ معلومات النشر
+        run: |
+          echo "══════════════════════════════════════════════════"
+          echo "  🚀 AFM MCQs BOT — جاري النشر"
+          echo "══════════════════════════════════════════════════"
+          echo "  📅 الوقت  : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "  📦 الحجم  : ${{ needs.validate.outputs.file_size }} بايت"
+          echo "  🏷️  الإصدار: ${{ needs.validate.outputs.app_version }}"
+          echo "  📚 أسئلة  : ${{ needs.validate.outputs.has_questions == 'true' && 'نعم ✅' || 'لا (force)' }}"
+          echo "  👤 بواسطة : ${{ github.actor }}"
+          echo "══════════════════════════════════════════════════"
+          echo "  🔄 المستخدمون سيحصلون على التحديث تلقائياً"
+          echo "     عند فتح التطبيق (APP_VERSION check)"
+          echo "══════════════════════════════════════════════════"
+
+      # ── إنشاء .nojekyll ───────────────────────────────────────────
+      - name: 📄 إنشاء .nojekyll
+        run: touch .nojekyll
+
+      # ── إعداد Pages ───────────────────────────────────────────────
+      - name: ⚙️ إعداد GitHub Pages
+        uses: actions/configure-pages@v4
+
+      # ── رفع الملفات ───────────────────────────────────────────────
+      - name: 📤 رفع ملفات الموقع
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+
+      # ── النشر ─────────────────────────────────────────────────────
+      - name: 🌐 النشر على GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: 🎉 تم النشر
+        run: |
+          echo "✅ تم نشر AFM MCQs BOT بنجاح"
+          echo "🔗 ${{ steps.deployment.outputs.page_url }}"
