@@ -1,0 +1,63 @@
+name: 🔔 إشعار نشر تلقائي (Admin API Push)
+
+# ══════════════════════════════════════════════════════════════════
+#  يُشغَّل عندما يرفع الأدمن الملف مباشرة عبر GitHub API
+#  (زر "نشر على GitHub" داخل التطبيق)
+#  الهدف: التحقق السريع + إشعار بنجاح أو فشل النشر
+# ══════════════════════════════════════════════════════════════════
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "index.html"
+
+jobs:
+  quick-check:
+    name: ⚡ فحص سريع بعد رفع الأدمن
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⚡ فحص سريع للملف
+        id: quick_check
+        run: |
+          SIZE=$(wc -c < index.html)
+          echo "size=${SIZE}" >> $GITHUB_OUTPUT
+
+          if [ "$SIZE" -lt 51200 ]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "reason=الملف صغير جداً (${SIZE} بايت)" >> $GITHUB_OUTPUT
+          elif ! grep -q "APP_VERSION" index.html; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "reason=APP_VERSION مفقود" >> $GITHUB_OUTPUT
+          else
+            echo "status=ok" >> $GITHUB_OUTPUT
+            VER=$(grep -oE "APP_VERSION='[^']*'" index.html | head -1 | grep -oE "'[^']*'" | tr -d "'" || echo "")
+            echo "version=${VER}" >> $GITHUB_OUTPUT
+            echo "reason=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📢 ملخص النشر
+        run: |
+          STATUS="${{ steps.quick_check.outputs.status }}"
+          SIZE="${{ steps.quick_check.outputs.size }}"
+          VER="${{ steps.quick_check.outputs.version }}"
+          REASON="${{ steps.quick_check.outputs.reason }}"
+
+          if [ "$STATUS" = "ok" ]; then
+            echo "✅ الملف صالح للنشر"
+            echo "📦 الحجم: ${SIZE} بايت"
+            echo "🏷️  APP_VERSION: ${VER}"
+            echo ""
+            echo "🔄 آلية التحديث للطلاب:"
+            echo "   ← كل طالب يفتح التطبيق سيتحقق من APP_VERSION"
+            echo "   ← إذا كانت القيمة مختلفة ← reload() تلقائي"
+            echo "   ← جميع الطلاب يشوفون الأسئلة الجديدة فوراً ✅"
+          else
+            echo "❌ تحذير: ${REASON}"
+            echo "   قد يكون النشر فشل أو الملف غير مكتمل"
+            exit 1
+          fi

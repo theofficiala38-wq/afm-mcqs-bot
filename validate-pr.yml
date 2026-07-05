@@ -1,0 +1,117 @@
+name: 🔍 فحص Pull Request
+
+# ══════════════════════════════════════════════════════════════════
+#  يُشغَّل عند فتح أو تحديث Pull Request يمس index.html
+#  الهدف: التحقق من سلامة الملف قبل الدمج (لمن يعمل بفريق)
+# ══════════════════════════════════════════════════════════════════
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "index.html"
+
+jobs:
+  validate-pr:
+    name: 🔍 فحص شامل للملف
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # ── مقارنة حجم الملف مع الإصدار السابق ──────────────────────
+      - name: 📊 مقارنة الحجم مع الإصدار السابق
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || true
+          OLD_SIZE=0
+          if git show origin/${{ github.base_ref }}:index.html > /tmp/old_index.html 2>/dev/null; then
+            OLD_SIZE=$(wc -c < /tmp/old_index.html)
+          fi
+          NEW_SIZE=$(wc -c < index.html)
+          echo "📦 الحجم القديم: ${OLD_SIZE} بايت"
+          echo "📦 الحجم الجديد: ${NEW_SIZE} بايت"
+          if [ "$OLD_SIZE" -gt 0 ]; then
+            DIFF=$((NEW_SIZE - OLD_SIZE))
+            PCT=$(echo "scale=1; $DIFF * 100 / $OLD_SIZE" | bc 2>/dev/null || echo "N/A")
+            echo "📈 الفرق: ${DIFF} بايت (${PCT}%)"
+            # تحذير إذا تقلّص الملف بأكثر من 30%
+            THRESHOLD=$((OLD_SIZE * 70 / 100))
+            if [ "$NEW_SIZE" -lt "$THRESHOLD" ] && [ "$OLD_SIZE" -gt 50000 ]; then
+              echo "⚠️  الملف تقلّص بأكثر من 30% — هل تأكدت من استخدام 'تصدير الموقع' كاملاً؟"
+            fi
+          fi
+
+      # ── التحقق من الحد الأدنى للحجم ──────────────────────────────
+      - name: 📦 فحص الحجم الأدنى
+        run: |
+          SIZE=$(wc -c < index.html)
+          if [ "$SIZE" -lt 51200 ]; then
+            echo "❌ الملف صغير جداً (${SIZE} بايت) — الحد الأدنى 50KB"
+            echo "   تأكد من استخدام 'تصدير الموقع' وليس نسخ ناقص للملف"
+            exit 1
+          fi
+          echo "✅ الحجم مقبول: ${SIZE} بايت"
+
+      # ── فحص العلامات الأساسية ─────────────────────────────────────
+      - name: 🔍 فحص علامات التطبيق
+        run: |
+          FAILED=0
+          declare -a REQUIRED=(
+            "AFM MCQs BOT"
+            "APP_VERSION"
+            "__SEED__"
+            "no-cache"
+            "publishToGitHub"
+            "exportSite"
+            "toggleTheme"
+          )
+          for marker in "${REQUIRED[@]}"; do
+            if grep -q "$marker" index.html; then
+              echo "✅ $marker"
+            else
+              echo "❌ مفقود: $marker"
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" -eq 1 ] && exit 1
+          echo "✅ جميع علامات التطبيق موجودة"
+
+      # ── فحص APP_VERSION ───────────────────────────────────────────
+      - name: 🏷️ فحص APP_VERSION
+        run: |
+          VER=$(grep -oE "APP_VERSION='[^']*'" index.html | head -1 | grep -oE "'[^']*'" | tr -d "'" || echo "")
+          echo "🏷️  APP_VERSION = '${VER}'"
+          if [ -z "$VER" ]; then
+            echo "⚠️  APP_VERSION فارغ — سيُحقن تلقائياً أثناء النشر"
+          elif echo "$VER" | grep -qE '^[0-9]{10,}$'; then
+            READABLE=$(date -d "@${VER:0:10}" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || echo "تاريخ صالح")
+            echo "✅ APP_VERSION = timestamp صالح (${READABLE})"
+          else
+            echo "⚠️  APP_VERSION بصيغة غير معتادة: '${VER}'"
+          fi
+
+      # ── فحص أمان التوكن ───────────────────────────────────────────
+      - name: 🔒 فحص الأمان
+        run: |
+          # GH_ENCRYPTED يجب أن يكون سلسلة فارغة
+          if grep -qE "var GH_ENCRYPTED\s*=\s*'[^']{50,}'" index.html 2>/dev/null; then
+            echo "⚠️  يبدو أن GH_ENCRYPTED يحتوي بيانات مشفّرة طويلة"
+            echo "   تذكير: التوكن مشفّر بكلمة سر الأدمن، فلا خطر مباشر"
+            echo "   لكن يُفضَّل حذف إعدادات GitHub قبل رفع الملف العام"
+          else
+            echo "✅ GH_ENCRYPTED فارغ أو قصير (لا يوجد توكن مكشوف)"
+          fi
+
+      # ── طباعة ملخص PR ─────────────────────────────────────────────
+      - name: 📋 ملخص الفحص
+        run: |
+          echo "══════════════════════════════════════════"
+          echo "  ✅ الملف اجتاز جميع الفحوصات"
+          echo "══════════════════════════════════════════"
+          echo "  📦 الحجم: $(wc -c < index.html) بايت"
+          echo "  🏷️  الإصدار: $(grep -oE "APP_VERSION='[^']*'" index.html | head -1)"
+          echo "  📚 الأسئلة: $(grep -q 'var __SEED__=null;' index.html && echo 'نموذجية' || echo 'مضمّنة')"
+          echo "══════════════════════════════════════════"
