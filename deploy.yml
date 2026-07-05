@@ -1,0 +1,163 @@
+name: نشر الموقع على GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:   # تشغيل يدوي من واجهة GitHub
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: سحب الكود
+        uses: actions/checkout@v4
+
+      - name: تنظيف البيانات الحساسة ونشر index.html فقط
+        run: |
+          python3 - << 'PYEOF'
+          import re, os, sys, shutil, time
+
+          src = "index.html"
+          if not os.path.exists(src):
+              print(f"❌ الملف {src} غير موجود في رووت الريبوزيتوري")
+              sys.exit(1)
+
+          with open(src, "r", encoding="utf-8") as f:
+              html = f.read()
+
+          original = html
+
+          # مسح قيمة GH_ENCRYPTED
+          patterns = [
+              r"""((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*')((?:[^'\\]|\\.)*)('(?:\s*;)?)""",
+              r'''((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*")((?:[^"\\]|\\.)*)(")''',
+          ]
+          found = False
+          for pat in patterns:
+              new_html, count = re.subn(pat, r"\g<1>\g<3>", html, flags=re.DOTALL)
+              if count > 0:
+                  html = new_html
+                  found = True
+                  print(f"✅ تم مسح GH_ENCRYPTED ({count} تكرار)")
+          if not found:
+              print("ℹ️  لم يُعثر على قيمة في GH_ENCRYPTED")
+
+          # تحديث APP_VERSION
+          timestamp = str(int(time.time() * 1000))
+          html, count_ver = re.subn(
+              r"""((?:var|let|const)\s+APP_VERSION\s*=\s*['"])[^'"]*(['"])""",
+              r"\g<1>" + timestamp + r"\g<2>",
+              html
+          )
+          if count_ver:
+              print(f"✅ تم تحديث APP_VERSION إلى {timestamp}")
+          else:
+              print("⚠️  لم يُعثر على APP_VERSION")
+
+          # منع الـ cache على مستوى الـ meta tags
+          no_cache = (
+              '<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">\n'
+              '    <meta http-equiv="Pragma" content="no-cache">\n'
+              '    <meta http-equiv="Expires" content="0">'
+          )
+          if 'Cache-Control' not in html:
+              html = html.replace('<head>', '<head>\n    ' + no_cache, 1)
+              print("✅ تمت إضافة no-cache headers")
+
+          # ── إزالة أي سكريبت SW قديم (killer أو registration) لتجنّب التكرار ──
+          html = re.sub(r'<script>[^<]*serviceWorker[^<]*</script>\n?', '', html)
+          print("✅ تم تنظيف أي SW script قديم")
+
+          # ── تسجيل Service Worker (network-first — يجيب HTML دايماً طازج) ──────
+          sw_register = (
+              '<script>'
+              "if('serviceWorker'in navigator){"
+              "navigator.serviceWorker.register('sw.js',{scope:'./'}).then(function(r){"
+              "r.addEventListener('updatefound',function(){"
+              "var nw=r.installing;"
+              "nw.addEventListener('statechange',function(){"
+              "if(nw.state==='activated'&&navigator.serviceWorker.controller){"
+              "window.location.reload();}"
+              "});});})"
+              ".catch(function(){});"
+              "var refreshing=false;"
+              "navigator.serviceWorker.addEventListener('controllerchange',function(){"
+              "if(!refreshing){refreshing=true;window.location.reload();}"
+              "});}"
+              '</script>'
+          )
+          html = html.replace('</head>', sw_register + '\n</head>', 1)
+          print("✅ تمت إضافة Service Worker registration")
+
+          # التحقق النهائي من عدم تسرّب التوكن
+          leak_check = re.search(
+              r"""(?:var|let|const)\s+GH_ENCRYPTED\s*=\s*(?:'[^']{4,}'|"[^"]{4,}")""",
+              html, re.DOTALL
+          )
+          if leak_check:
+              print("❌ خطأ حرج: لا تزال توجد قيمة غير فارغة في GH_ENCRYPTED!")
+              sys.exit(1)
+          else:
+              print("✅ التحقق اجتاز — الملف نظيف")
+
+          # ── sw.js — Network-First Service Worker ────────────────────────────
+          # يجبر المتصفح يجيب صفحة الـ HTML دايماً من النت (مش من الكاش)
+          # ده بيضمن إن كل مستخدم يشوف آخر تحديث فوراً بعد النشر
+          sw_content = (
+              "// Network-First SW — الـ HTML دايماً من النت مش من الكاش\n"
+              f"var SW_VERSION='{timestamp}';\n"
+              "self.addEventListener('install',function(e){\n"
+              "  // تفعيل فوري بدون انتظار الـ tabs القديمة تتقفل\n"
+              "  e.waitUntil(self.skipWaiting());\n"
+              "});\n"
+              "self.addEventListener('activate',function(e){\n"
+              "  // استحواذ فوري على كل الصفحات المفتوحة\n"
+              "  e.waitUntil(\n"
+              "    caches.keys().then(function(keys){\n"
+              "      return Promise.all(keys.map(function(k){return caches.delete(k);}));\n"
+              "    }).then(function(){return self.clients.claim();})\n"
+              "  );\n"
+              "});\n"
+              "self.addEventListener('fetch',function(e){\n"
+              "  // طلبات التنقل (HTML) → دايماً من النت\n"
+              "  if(e.request.mode==='navigate'){\n"
+              "    e.respondWith(\n"
+              "      fetch(e.request,{cache:'no-cache'})\n"
+              "        .catch(function(){\n"
+              "          return caches.match(e.request)||new Response('Offline',{status:503});\n"
+              "        })\n"
+              "    );\n"
+              "  }\n"
+              "  // باقي الموارد → اتركها للمتصفح\n"
+              "});\n"
+          )
+
+          out_dir = "_clean_deploy"
+          os.makedirs(out_dir, exist_ok=True)
+
+          with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
+              f.write(html)
+
+          # نكتب sw.js في المسارات الشائعة كلها
+          for sw_path in ["sw.js", "service-worker.js"]:
+              with open(os.path.join(out_dir, sw_path), "w", encoding="utf-8") as f:
+                  f.write(sw_content)
+          print("✅ تم إنشاء sw.js (network-first) لضمان رؤية التحديثات فوراً")
+
+          print(f"📦 الملف النظيف جاهز في {out_dir}/")
+          PYEOF
+
+      - name: نشر على gh-pages (حذف القديم كامل وبدء من الصفر)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_clean_deploy
+          publish_branch: gh-pages
+          commit_message: "🚀 نشر آمن — ${{ github.sha }}"
+          force_orphan: true
+          keep_files: false
