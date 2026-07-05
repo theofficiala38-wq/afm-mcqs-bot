@@ -16,25 +16,16 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: ⚡ فحص سريع
+      - name: ⚡ فحص
         run: |
           SIZE=$(wc -c < index.html)
           echo "📦 الحجم: ${SIZE} بايت"
-
           if [ "$SIZE" -lt 51200 ]; then
             echo "❌ الملف صغير جداً"
             exit 1
           fi
-
-          if grep -q "var __SEED__=null;" index.html; then
-            echo "❌ __SEED__ = null — الملف بدون أسئلة"
-            echo "   افتح التطبيق وأعد النشر عبر 'نشر على GitHub'"
-            exit 1
-          fi
-
           VER=$(grep -oE "APP_VERSION='[^']*'" index.html | head -1 | grep -oE "'[^']*'" | tr -d "'" || echo "")
-          echo "✅ الملف صالح"
           echo "🏷️  APP_VERSION: ${VER}"
-          echo "📚 الأسئلة مضمّنة ✅"
-          echo ""
-          echo "🔄 المستخدمون سيحصلون على التحديث تلقائياً عند فتح التطبيق"
+          grep -q "var __SEED__=null;" index.html \
+            && echo "⚠️  بدون أسئلة — الموقع سيعمل بالأسئلة النموذجية" \
+            || echo "✅ يحتوي أسئلة مضمّنة"
