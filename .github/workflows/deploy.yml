@@ -26,25 +26,74 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Prepare Clean Files
+      - name: Clean and Prepare Files
         run: |
-          # إنشاء المجلد والتأكد من أنه موجود
-          mkdir -p _clean_deploy
-          
-          # تشغيل سكريبت البايثون لتوليد الملفات
-          python3 -c "
-          import os
-          # (هنا نضع الكود الذي يولد الملفات)
-          # تأكدنا أننا نكتب في _clean_deploy مباشرة
-          with open('_clean_deploy/index.html', 'w', encoding='utf-8') as f:
-              f.write('<html><body>Test Page</body></html>') 
-          with open('_clean_deploy/.nojekyll', 'w') as f:
-              f.write('')
-          print('✅ Files created in _clean_deploy')
-          "
+          python3 - << 'PYEOF'
+          import re, os, sys, time
 
-      - name: Debug - List Files
-        run: ls -R _clean_deploy/
+          src = "index.html"
+          if not os.path.exists(src):
+              print(f"❌ الملف {src} غير موجود")
+              sys.exit(1)
+
+          with open(src, "r", encoding="utf-8") as f:
+              html = f.read()
+
+          # 1. إزالة GH_ENCRYPTED
+          patterns = [
+              r"""((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*')((?:[^'\\]|\\.)*)('(?:\s*;)?)\s*""",
+              r'((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*")((?:[^"\\]|\\.)*)("(?:\s*;)?)\s*'
+          ]
+          for pat in patterns:
+              html, _ = re.subn(pat, r"\g<1>\g<3>", html, flags=re.DOTALL)
+
+          # 2. تحديث APP_VERSION
+          timestamp = str(int(time.time() * 1000))
+          html, _ = re.subn(
+              r"""((?:var|let|const)\s+APP_VERSION\s*=\s*['"])[^'"]*(['"])""",
+              r"\g<1>" + timestamp + r"\g<2>",
+              html
+          )
+
+          # 3. إعدادات الـ Cache
+          no_cache = '<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">\n    <meta http-equiv="Pragma" content="no-cache">\n    <meta http-equiv="Expires" content="0">'
+          if 'Cache-Control' not in html:
+              html = html.replace('<head>', '<head>\n    ' + no_cache, 1)
+
+          # 4. معالجة Service Worker
+          html = re.sub(r'<script>[^<]*serviceWorker[^<]*</script>\n?', '', html)
+          sw_script = f"""<script>
+          if ('serviceWorker' in navigator) {{
+            navigator.serviceWorker.register('sw.js?v={timestamp}')
+              .then(reg => {{
+                reg.onupdatefound = () => {{
+                  const installingWorker = reg.installing;
+                  installingWorker.onstatechange = () => {{
+                    if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {{
+                      window.location.reload(true);
+                    }}
+                  }};
+                }};
+              }});
+          }}
+          </script>"""
+          html = html.replace('</body>', sw_script + '\n</body>')
+
+          # 5. إنشاء sw.js
+          sw_content = (
+              f"// {timestamp}\nvar SW_VERSION='{timestamp}';\n"
+              "self.addEventListener('install',e=>e.waitUntil(self.skipWaiting()));\n"
+              "self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(k=>Promise.all(k.map(c=>caches.delete(c)))).then(()=>self.clients.claim())));\n"
+              "self.addEventListener('fetch',e=>{if(e.request.mode==='navigate')e.respondWith(fetch(e.request,{cache:'no-store'}).catch(()=>caches.match(e.request)||new Response('Offline',{status:503})));});"
+          )
+
+          out_dir = "_clean_deploy"
+          os.makedirs(out_dir, exist_ok=True)
+          with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
+          with open(os.path.join(out_dir, "sw.js"), "w", encoding="utf-8") as f: f.write(sw_content)
+          with open(os.path.join(out_dir, ".nojekyll"), "w") as f: f.write("")
+          print("✅ Files prepared")
+          PYEOF
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -52,7 +101,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '_clean_deploy' # تأكدنا هنا من استخدام المسار بدون ./
+          path: '_clean_deploy'
 
       - name: Deploy to GitHub Pages
         id: deployment
