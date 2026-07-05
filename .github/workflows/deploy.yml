@@ -8,16 +8,25 @@ on:
   workflow_dispatch:   # تشغيل يدوي من واجهة GitHub
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: سحب الكود
         uses: actions/checkout@v4
 
-      - name: تنظيف البيانات الحساسة ونشر index.html فقط
+      - name: تنظيف البيانات الحساسة وتحضير الملفات للنشر
         run: |
           python3 - << 'PYEOF'
           import re, os, sys, shutil, time
@@ -32,7 +41,7 @@ jobs:
 
           original = html
 
-          # مسح قيمة GH_ENCRYPTED
+          # مسح قيمة GH_ENCRYPTED لعدم تسريب التوكن على النسخة العامة المنشورة
           patterns = [
               r"""((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*')((?:[^'\\]|\\.)*)('(?:\s*;)?)""",
               r'''((?:var|let|const)\s+GH_ENCRYPTED\s*=\s*")((?:[^"\\]|\\.)*)(")''',
@@ -47,7 +56,7 @@ jobs:
           if not found:
               print("ℹ️  لم يُعثر على قيمة في GH_ENCRYPTED")
 
-          # تحديث APP_VERSION
+          # تحديث APP_VERSION لمنع التخزين المؤقت للمتصفحات
           timestamp = str(int(time.time() * 1000))
           html, count_ver = re.subn(
               r"""((?:var|let|const)\s+APP_VERSION\s*=\s*['"])[^'"]*(['"])""",
@@ -69,11 +78,11 @@ jobs:
               html = html.replace('<head>', '<head>\n    ' + no_cache, 1)
               print("✅ تمت إضافة no-cache headers")
 
-          # ── إزالة أي سكريبت SW قديم (killer أو registration) لتجنّب التكرار ──
+          # إزالة أي سكريبت SW قديم لتجنب التكرار والتداخل
           html = re.sub(r'<script>[^<]*serviceWorker[^<]*</script>\n?', '', html)
           print("✅ تم تنظيف أي SW script قديم")
 
-          # ── تسجيل Service Worker (network-first — يجيب HTML دايماً طازج) ──────
+          # تسجيل Service Worker لضمان جلب الصفحة دائماً من السيرفر مباشرة
           sw_register = (
               '<script>'
               "if('serviceWorker'in navigator){"
@@ -105,18 +114,14 @@ jobs:
           else:
               print("✅ التحقق اجتاز — الملف نظيف")
 
-          # ── sw.js — Network-First Service Worker ────────────────────────────
-          # يجبر المتصفح يجيب صفحة الـ HTML دايماً من النت (مش من الكاش)
-          # ده بيضمن إن كل مستخدم يشوف آخر تحديث فوراً بعد النشر
+          # إنشاء ملف sw.js لضمان جلب الصفحة مباشرة من الإنترنت
           sw_content = (
               "// Network-First SW — الـ HTML دايماً من النت مش من الكاش\n"
               f"var SW_VERSION='{timestamp}';\n"
               "self.addEventListener('install',function(e){\n"
-              "  // تفعيل فوري بدون انتظار الـ tabs القديمة تتقفل\n"
               "  e.waitUntil(self.skipWaiting());\n"
               "});\n"
               "self.addEventListener('activate',function(e){\n"
-              "  // استحواذ فوري على كل الصفحات المفتوحة\n"
               "  e.waitUntil(\n"
               "    caches.keys().then(function(keys){\n"
               "      return Promise.all(keys.map(function(k){return caches.delete(k);}));\n"
@@ -124,7 +129,6 @@ jobs:
               "  );\n"
               "});\n"
               "self.addEventListener('fetch',function(e){\n"
-              "  // طلبات التنقل (HTML) → دايماً من النت\n"
               "  if(e.request.mode==='navigate'){\n"
               "    e.respondWith(\n"
               "      fetch(e.request,{cache:'no-cache'})\n"
@@ -133,7 +137,6 @@ jobs:
               "        })\n"
               "    );\n"
               "  }\n"
-              "  // باقي الموارد → اتركها للمتصفح\n"
               "});\n"
           )
 
@@ -143,21 +146,22 @@ jobs:
           with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
               f.write(html)
 
-          # نكتب sw.js في المسارات الشائعة كلها
           for sw_path in ["sw.js", "service-worker.js"]:
               with open(os.path.join(out_dir, sw_path), "w", encoding="utf-8") as f:
                   f.write(sw_content)
-          print("✅ تم إنشاء sw.js (network-first) لضمان رؤية التحديثات فوراً")
+          
+          # إنشاء ملف لمنع معالجة جيكيل للملفات لضمان عدم حدوث أخطاء صامتة
+          with open(os.path.join(out_dir, ".nojekyll"), "w") as f:
+              f.write("")
 
           print(f"📦 الملف النظيف جاهز في {out_dir}/")
           PYEOF
 
-      - name: نشر على gh-pages (حذف القديم كامل وبدء من الصفر)
-        uses: peaceiris/actions-gh-pages@v4
+      - name: رفع الملفات الجاهزة كـ Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./_clean_deploy
-          publish_branch: gh-pages
-          commit_message: "🚀 نشر آمن — ${{ github.sha }}"
-          force_orphan: true
-          keep_files: false
+          path: ./_clean_deploy
+
+      - name: نشر مباشر على GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
