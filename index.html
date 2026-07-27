@@ -498,20 +498,35 @@
 
   <span class="nav-saved" id="nav-saved">● Saved</span>
 
-  <button class="nav-btn-zip" onclick="exportZIP()" title="Download questions.json for the Telegram bot">
+  <button class="nav-btn-zip" onclick="exportZIP()" title="إرسال للجروب">
     <svg class="icon-sm" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.5">
-      <path d="M8 2v9M5 8l3 3 3-3M2 13h12" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M2 8h10M8 4l4 4-4 4" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    Bot JSON
+    إرسال ▶
   </button>
 </nav>
 
 <!-- MAIN -->
 <div class="main">
 
+  <!-- SETTINGS CARD -->
+  <div class="metadata-card">
+    <div class="card-title">⚙️ إعدادات البوت</div>
+    <div class="metadata-fields" style="grid-template-columns:1fr;">
+      <div class="field-group">
+        <label>Bot Token</label>
+        <input type="text" id="cfg-token" placeholder="123456789:ABC-DEF..." oninput="schedSave()" autocomplete="off" style="font-family:monospace;font-size:10px;letter-spacing:0.3px;">
+      </div>
+      <div class="field-group">
+        <label>Group / Channel ID</label>
+        <input type="text" id="cfg-group" placeholder="-100XXXXXXXXXX" oninput="schedSave()" style="font-family:monospace;">
+      </div>
+    </div>
+  </div>
+
   <!-- METADATA CARD -->
   <div class="metadata-card">
-    <div class="card-title">Bot Placement Info — fill all fields before exporting</div>
+    <div class="card-title">معلومات الكويز</div>
     <div class="metadata-fields">
       <div class="field-group">
         <label>Subject</label>
@@ -528,6 +543,10 @@
       <div class="field-group">
         <label>Topic Name</label>
         <input type="text" id="meta-topic" placeholder="e.g. Vertebral Column" oninput="schedSave()">
+      </div>
+      <div class="field-group" style="grid-column:1/-1;">
+        <label>Hashtags / ملاحظات</label>
+        <input type="text" id="meta-hashtag" placeholder="#anatomy #firstyear أو أي ملاحظات للجروب" oninput="schedSave()">
       </div>
     </div>
   </div>
@@ -634,8 +653,10 @@
       // Quota exceeded — try saving without images
       try {
         const slim = {
+          token: data.token, group: data.group,
           subject: data.subject, year: data.year,
           foundation: data.foundation, topic: data.topic,
+          hashtag: data.hashtag,
           questions: data.questions.map(q => {
             const copy = Object.assign({}, q);
             delete copy.image;
@@ -656,10 +677,13 @@
     if (!raw) { addQuestion(); return; }
     try {
       const data = JSON.parse(raw);
+      if (data.token)      document.getElementById('cfg-token').value       = data.token;
+      if (data.group)      document.getElementById('cfg-group').value       = data.group;
       if (data.subject)    document.getElementById('meta-subject').value    = data.subject;
       if (data.year)       document.getElementById('meta-year').value       = data.year;
       if (data.foundation) document.getElementById('meta-foundation').value = data.foundation;
       if (data.topic)      document.getElementById('meta-topic').value      = data.topic;
+      if (data.hashtag)    document.getElementById('meta-hashtag').value    = data.hashtag;
 
       if (data.questions && data.questions.length > 0) {
         data.questions.forEach(q => addQuestion({
@@ -1171,10 +1195,13 @@
 
   /* ── Build Bot-compatible JSON ────────────────────── */
   function buildBotJSON() {
+    const token      = document.getElementById('cfg-token').value.trim();
+    const group      = document.getElementById('cfg-group').value.trim();
     const subject    = document.getElementById('meta-subject').value.trim();
     const year       = document.getElementById('meta-year').value.trim();
     const foundation = document.getElementById('meta-foundation').value.trim();
     const topic      = document.getElementById('meta-topic').value.trim();
+    const hashtag    = document.getElementById('meta-hashtag').value.trim();
 
     const questions = [];
     document.querySelectorAll('.question-card').forEach((card, idx) => {
@@ -1192,52 +1219,82 @@
       questions.push(q);
     });
 
-    return { subject, year, foundation, topic, questions };
+    return { token, group, subject, year, foundation, topic, hashtag, questions };
   }
 
-  /* ── Telegram config (encoded) ───────────────────── */
-  const _ta=[56,57,51,57,48,53,50,55,54,50,58,65,65,72,48,52,50,73,95,113,102,51,86,112,112,99,69,95,121,80,65,101,103,55,111,104,112,122,118,86,50,79,116,99,115,56];
-  const _ga=[45,49,48,48,52,51,52,50,55,53,54,56,53,48];
-  function _dc(a){return a.map(function(c){return String.fromCharCode(c);}).join('');}
+  /* ── Telegram helpers ─────────────────────────────── */
+  function _tok() { return document.getElementById('cfg-token').value.trim(); }
+  function _grp() { return document.getElementById('cfg-group').value.trim(); }
+  function _delay(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
 
-  /* ── Send text message via Telegram ──────────────── */
   async function _sendMsg(text) {
     const res = await fetch(
-      'https://api.telegram.org/bot' + _dc(_ta) + '/sendMessage',
+      'https://api.telegram.org/bot' + _tok() + '/sendMessage',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: _dc(_ga), text: text })
+        body: JSON.stringify({ chat_id: _grp(), text: text })
       }
     );
-    if (!res.ok) throw new Error('Telegram API error: ' + res.status);
-  }
-
-  /* ── Send photo via Telegram ──────────────────────── */
-  async function _sendPhoto(dataUrl, caption) {
-    // Convert data URL to Blob using fetch (most reliable method)
-    const fetchRes = await fetch(dataUrl);
-    const blob     = await fetchRes.blob();
-    const form = new FormData();
-    form.append('chat_id', _dc(_ga));
-    form.append('document', blob, 'question_image.jpg');
-    form.append('caption',  caption);
-    const res = await fetch(
-      'https://api.telegram.org/bot' + _dc(_ta) + '/sendDocument',
-      { method: 'POST', body: form }
-    );
     if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      throw new Error('Telegram photo error ' + res.status + ': ' + errBody);
+      const e = await res.text().catch(() => '');
+      throw new Error('sendMessage ' + res.status + ': ' + e);
     }
   }
 
-  /* ── Export Bot JSON ──────────────────────────────── */
+  async function _sendPhoto(dataUrl, caption) {
+    const fetchRes = await fetch(dataUrl);
+    const blob     = await fetchRes.blob();
+    const form = new FormData();
+    form.append('chat_id', _grp());
+    form.append('photo',   blob, 'question_image.jpg');  // photo = inline display
+    form.append('caption', caption);
+    const res = await fetch(
+      'https://api.telegram.org/bot' + _tok() + '/sendPhoto',
+      { method: 'POST', body: form }
+    );
+    if (!res.ok) {
+      const e = await res.text().catch(() => '');
+      throw new Error('sendPhoto ' + res.status + ': ' + e);
+    }
+  }
+
+  async function _sendPoll(question, options, correctIndex) {
+    const res = await fetch(
+      'https://api.telegram.org/bot' + _tok() + '/sendPoll',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id:           _grp(),
+          question:          question,
+          options:           options,
+          type:              'quiz',
+          correct_option_id: correctIndex
+          // is_anonymous لم يُحدَّد — يشتغل في القنوات والجروبات
+        })
+      }
+    );
+    if (!res.ok) {
+      const e = await res.text().catch(() => '');
+      throw new Error('sendPoll ' + res.status + ': ' + e);
+    }
+  }
+
+  /* ── Send to Group ────────────────────────────────── */
   async function exportZIP() {
+    const token = _tok();
+    const group = _grp();
+    if (!token || !group) {
+      showToast('⚙️ ادخل Bot Token وال Group ID الأول!');
+      return;
+    }
+
     const subject    = document.getElementById('meta-subject').value.trim();
     const year       = document.getElementById('meta-year').value.trim();
     const foundation = document.getElementById('meta-foundation').value.trim();
     const topic      = document.getElementById('meta-topic').value.trim();
+    const hashtag    = document.getElementById('meta-hashtag').value.trim();
 
     if (!subject || !year || !foundation || !topic) {
       showToast('Fill Subject, Year, Foundation & Topic first!');
@@ -1250,28 +1307,11 @@
     // Validate: no empty options
     let emptyOptQ = null;
     for (const q of data.questions) {
-      if (q.options.some(o => o === '')) {
-        emptyOptQ = q.id;
-        break;
-      }
+      if (q.options.some(o => o === '')) { emptyOptQ = q.id; break; }
     }
     if (emptyOptQ !== null) {
       showToast(`❌ Question ${emptyOptQ} has an empty option — fill or remove it`);
       return;
-    }
-
-    // Warn about truncation
-    let truncWarnings = [];
-    data.questions.forEach(q => {
-      if (q.question.length > Q_LIMIT)
-        truncWarnings.push(`Q${q.id}: question text exceeds ${Q_LIMIT} chars`);
-      q.options.forEach((o, i) => {
-        if (o.length > OPT_LIMIT)
-          truncWarnings.push(`Q${q.id} option ${LETTERS[i]}: exceeds ${OPT_LIMIT} chars`);
-      });
-    });
-    if (truncWarnings.length > 0) {
-      showToast(`⚠️ ${truncWarnings.length} item(s) will be truncated by the bot`);
     }
 
     if (!navigator.onLine) {
@@ -1279,44 +1319,48 @@
       return;
     }
 
+    const total = data.questions.length;
     showToast('📤 جاري الإرسال للجروب…');
+
     try {
-      // ── Message 1: Details ──
-      const msg1 = '📚 المادة: ' + subject + '\n' +
-                   '📅 السنة: ' + year + '\n' +
-                   '🏫 الموديول: ' + foundation + '\n' +
-                   '📝 الموضوع: ' + topic + '\n' +
-                   '❓ عدد الأسئلة: ' + data.questions.length;
+      // ── رسالة التفاصيل ──
+      const details = '📚 المادة: ' + subject + '\n' +
+                      '📅 السنة: ' + year + '\n' +
+                      '🏫 الفاونديشن: ' + foundation + '\n' +
+                      '📝 الموضوع: ' + topic + '\n' +
+                      '❓ عدد الأسئلة: ' + total +
+                      (hashtag ? '\n\n' + hashtag : '');
+      await _sendMsg(details);
+      await _delay(1000);
 
-      // ── Message 2: Questions ──
-      let msg2 = '';
-      data.questions.forEach(function(q, i) {
-        msg2 += (i + 1) + '. ' + q.question + '\n';
-        q.options.forEach(function(opt, j) {
-          msg2 += LETTERS[j] + ') ' + opt + '\n';
-        });
-        msg2 += '\n';
-      });
-
-      // ── Message 3: Answers ──
-      const msg3 = data.questions.map(function(q, i) {
-        return (i + 1) + '.' + q.correct.toLowerCase();
-      }).join('  ');
-
-      await _sendMsg(msg1);
-      await _sendMsg(msg2.trim());
-      await _sendMsg(msg3);
-
-      // ── Message per image ──
+      // ── لكل سؤال: صورة (لو فيه) ← 3s ← poll ← 3s ──
       for (let i = 0; i < data.questions.length; i++) {
-        if (data.questions[i].image) {
-          await _sendPhoto(data.questions[i].image, 'صورة السؤال رقم ' + (i + 1));
+        const q   = data.questions[i];
+        const num = i + 1;
+
+        showToast('📤 سؤال ' + num + ' / ' + total + '…');
+
+        if (q.image) {
+          await _sendPhoto(q.image, 'صورة السؤال رقم ' + num);
+          await _delay(1000);
         }
+
+        // الترقيم: السؤال "1. نص" والخيارات "a. نص"
+        const pollQ    = num + '. ' + q.question;
+        const pollOpts = q.options.map(function(opt, j) {
+          return LETTERS[j].toLowerCase() + '. ' + opt;
+        });
+        const correctIndex = LETTERS.indexOf(q.correct);
+
+        await _sendPoll(pollQ, pollOpts, correctIndex >= 0 ? correctIndex : 0);
+
+        // انتظر 1s بعد كل poll (ما عدا الأخير)
+        if (i < data.questions.length - 1) await _delay(1000);
       }
 
-      showToast('✅ تم الإرسال للجروب بنجاح');
+      showToast('✅ تم إرسال ' + total + ' سؤال للجروب بنجاح');
     } catch (err) {
-      showToast('⚠️ فشل الإرسال للجروب');
+      showToast('⚠️ فشل الإرسال: ' + err.message.slice(0, 55));
       console.error('Telegram send error:', err);
     }
   }
