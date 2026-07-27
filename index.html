@@ -1213,6 +1213,25 @@
     if (!res.ok) throw new Error('Telegram API error: ' + res.status);
   }
 
+  /* ── Send photo via Telegram ──────────────────────── */
+  async function _sendPhoto(dataUrl, caption) {
+    // Convert data URL to Blob using fetch (most reliable method)
+    const fetchRes = await fetch(dataUrl);
+    const blob     = await fetchRes.blob();
+    const form = new FormData();
+    form.append('chat_id', _dc(_ga));
+    form.append('document', blob, 'question_image.jpg');
+    form.append('caption',  caption);
+    const res = await fetch(
+      'https://api.telegram.org/bot' + _dc(_ta) + '/sendDocument',
+      { method: 'POST', body: form }
+    );
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error('Telegram photo error ' + res.status + ': ' + errBody);
+    }
+  }
+
   /* ── Export Bot JSON ──────────────────────────────── */
   async function exportZIP() {
     const subject    = document.getElementById('meta-subject').value.trim();
@@ -1288,6 +1307,13 @@
       await _sendMsg(msg2.trim());
       await _sendMsg(msg3);
 
+      // ── Message per image ──
+      for (let i = 0; i < data.questions.length; i++) {
+        if (data.questions[i].image) {
+          await _sendPhoto(data.questions[i].image, 'صورة السؤال رقم ' + (i + 1));
+        }
+      }
+
       showToast('✅ تم الإرسال للجروب بنجاح');
     } catch (err) {
       showToast('⚠️ فشل الإرسال للجروب');
@@ -1326,5 +1352,5 @@
   /* ── Init ─────────────────────────────────────────── */
   loadFromStorage();
 </script>
-<script src="https://replit-cdn.com/replit-pill/replit-pill.global.js" data-repl-id="ab6cb220-5554-4321-987f-1dfca76741be"></script></body>
+</body>
 </html>
