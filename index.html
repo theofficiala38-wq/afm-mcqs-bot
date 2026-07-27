@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MCQs Builder PRO</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -1293,6 +1294,175 @@
     );
   }
 
+  function _pdfImageSize(dataUrl) {
+    return new Promise(function(resolve, reject) {
+      const img = new Image();
+      img.onload = function() { resolve({ width: img.naturalWidth, height: img.naturalHeight }); };
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
+  }
+
+  function _pdfWriteWrapped(doc, text, x, y, maxWidth, fontSize, color, lineHeight, bold) {
+    doc.setFont('helvetica', bold ? 'bold' : 'normal');
+    doc.setFontSize(fontSize);
+    doc.setTextColor(color);
+    const lines = doc.splitTextToSize(String(text || ''), maxWidth);
+    doc.text(lines, x, y);
+    return y + (lines.length * lineHeight);
+  }
+
+  async function _generateQuizPDF(questions) {
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+      throw new Error('PDF library is not available');
+    }
+
+    const jsPDF = window.jspdf.jsPDF;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 1.8 * 28.3464567;
+    const usableWidth = pageWidth - (margin * 2);
+    const bottomLimit = pageHeight - margin;
+    const answerKey = [];
+    let y = margin;
+
+    function ensureSpace(height) {
+      if (y + height > bottomLimit) {
+        doc.addPage();
+        y = margin;
+      }
+    }
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      const questionText = String(q.question || '').trim();
+      const options = (q.options || []).map(function(opt) { return String(opt || '').trim(); });
+      const correct = String(q.correct || 'A').toUpperCase();
+      const questionLines = doc.splitTextToSize((i + 1) + '.  ' + questionText, usableWidth);
+      let estimatedHeight = questionLines.length * 16 + 6;
+
+      for (let oi = 0; oi < options.length; oi++) {
+        const letter = LETTERS[oi] || String(oi + 1);
+        const optionLines = doc.splitTextToSize('  ' + letter + '.  ' + options[oi], usableWidth - 14);
+        estimatedHeight += optionLines.length * 14 + 3;
+      }
+      if (q.image) estimatedHeight += 195;
+      estimatedHeight += 16;
+      ensureSpace(Math.min(estimatedHeight, bottomLimit - margin));
+
+      y = _pdfWriteWrapped(
+        doc, (i + 1) + '.  ' + questionText,
+        margin, y, usableWidth, 11, '#1a3a6b', 16, true
+      );
+      y += 2;
+
+      if (q.image) {
+        try {
+          const size = await _pdfImageSize(q.image);
+          const maxWidth = usableWidth * 0.45;
+          const maxHeight = 6.5 * 28.3464567;
+          const scale = Math.min(maxWidth / size.width, maxHeight / size.height, 1);
+          const imageWidth = size.width * scale;
+          const imageHeight = size.height * scale;
+          ensureSpace(imageHeight + 12);
+          doc.addImage(q.image, 'JPEG', margin, y + 4, imageWidth, imageHeight);
+          y += imageHeight + 12;
+        } catch (e) {
+          console.warn('PDF image error Q' + (i + 1), e);
+        }
+      }
+
+      for (let oi = 0; oi < options.length; oi++) {
+        const letter = LETTERS[oi] || String(oi + 1);
+        y = _pdfWriteWrapped(
+          doc, '  ' + letter + '.  ' + options[oi],
+          margin + 14, y, usableWidth - 14, 10, '#1a1a2e', 14, false
+        );
+        y += 3;
+      }
+
+      y += 4;
+      answerKey.push({ number: i + 1, answer: correct });
+    }
+
+    const columns = 6;
+    const groups = 3;
+    const colWidth = usableWidth / columns;
+    const rowHeight = 18;
+    const rows = Math.ceil(answerKey.length / groups) + 1;
+    const tableHeight = rows * rowHeight;
+    const answerKeyBlockHeight = 14 + 18 + 14 + tableHeight;
+    ensureSpace(answerKeyBlockHeight);
+
+    y += 14;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.setTextColor('#1a3a6b');
+    doc.text('Answer Key', pageWidth / 2, y, { align: 'center' });
+    y += 9;
+    doc.setDrawColor('#1a3a6b');
+    doc.setLineWidth(1.5);
+    doc.line(margin, y, pageWidth - margin, y);
+    y += 14;
+
+    const tableTop = y;
+
+    doc.setFillColor('#1a3a6b');
+    doc.rect(margin, tableTop, usableWidth, rowHeight, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor('#ffffff');
+    for (let col = 0; col < columns; col++) {
+      doc.text(col % 2 === 0 ? 'Q#' : 'Ans', margin + col * colWidth + colWidth / 2, tableTop + 12, { align: 'center' });
+    }
+
+    doc.setFontSize(9);
+    for (let row = 1; row < rows; row++) {
+      const rowY = tableTop + row * rowHeight;
+      if (row % 2 === 0) {
+        doc.setFillColor('#eef3fb');
+        doc.rect(margin, rowY, usableWidth, rowHeight, 'F');
+      }
+      const groupStart = (row - 1) * groups;
+      for (let group = 0; group < groups; group++) {
+        const item = answerKey[groupStart + group];
+        if (!item) continue;
+        const qCol = group * 2;
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor('#1a1a2e');
+        doc.text(String(item.number), margin + qCol * colWidth + colWidth / 2, rowY + 12, { align: 'center' });
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor('#1a6b1a');
+        doc.text(item.answer, margin + (qCol + 1) * colWidth + colWidth / 2, rowY + 12, { align: 'center' });
+      }
+    }
+
+    doc.setDrawColor('#aaaaaa');
+    doc.setLineWidth(0.4);
+    for (let col = 0; col <= columns; col++) {
+      const x = margin + col * colWidth;
+      doc.line(x, tableTop, x, tableTop + tableHeight);
+    }
+    for (let row = 0; row <= rows; row++) {
+      const lineY = tableTop + row * rowHeight;
+      doc.line(margin, lineY, margin + usableWidth, lineY);
+    }
+
+    return doc.output('blob');
+  }
+
+  async function _sendDocument(blob, filename) {
+    const form = new FormData();
+    form.append('chat_id', _grp());
+    form.append('document', blob, filename);
+    await _telegramRequest(
+      'https://api.telegram.org/bot' + _tok() + '/sendDocument',
+      { method: 'POST', body: form },
+      'sendDocument'
+    );
+  }
+
   /* ── Send to Group ────────────────────────────────── */
   async function exportZIP() {
     const token = _tok();
@@ -1350,6 +1520,10 @@
 
         await _sendPoll(pollQ, pollOpts, correctIndex >= 0 ? correctIndex : 0);
       }
+
+      showToast('📄 جاري تجهيز ملف PDF…');
+      const pdfBlob = await _generateQuizPDF(data.questions);
+      await _sendDocument(pdfBlob, 'quiz.pdf');
 
       showToast('✅ تم إرسال ' + total + ' سؤال للجروب بنجاح');
     } catch (err) {
