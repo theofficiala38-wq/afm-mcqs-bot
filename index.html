@@ -1200,9 +1200,21 @@
   function _grp() { return document.getElementById('cfg-group').value.trim(); }
   function _delay(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
 
+  // Telegram allows about 20 messages per minute in a group.
+  // Keep a steady, safe pace instead of sending quickly then hitting a flood limit.
+  const TELEGRAM_SEND_INTERVAL = 3200;
+  let lastTelegramSendAt = 0;
+
+  async function _waitForTelegramTurn() {
+    const wait = lastTelegramSendAt + TELEGRAM_SEND_INTERVAL - Date.now();
+    if (wait > 0) await _delay(wait);
+    lastTelegramSendAt = Date.now();
+  }
+
   async function _telegramRequest(url, options, label) {
     const maxRetries = 5;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      await _waitForTelegramTurn();
       const res = await fetch(url, options);
       if (res.ok) return;
 
@@ -1316,10 +1328,9 @@
     try {
       if (hashtag) {
         await _sendMsg(hashtag);
-        await _delay(1000);
       }
 
-      // ── لكل سؤال: صورة (لو فيه) ← 1s ← poll ← 1s ──
+      // ── لكل سؤال: صورة (لو فيه) ← poll ──
       for (let i = 0; i < data.questions.length; i++) {
         const q   = data.questions[i];
         const num = i + 1;
@@ -1328,7 +1339,6 @@
 
         if (q.image) {
           await _sendPhoto(q.image, '');
-          await _delay(1000);
         }
 
         // الترقيم: السؤال "1. نص" والخيارات "a. نص"
@@ -1339,9 +1349,6 @@
         const correctIndex = LETTERS.indexOf(q.correct);
 
         await _sendPoll(pollQ, pollOpts, correctIndex >= 0 ? correctIndex : 0);
-
-        // انتظر 1s بعد كل poll (ما عدا الأخير)
-        if (i < data.questions.length - 1) await _delay(1000);
       }
 
       showToast('✅ تم إرسال ' + total + ' سؤال للجروب بنجاح');
