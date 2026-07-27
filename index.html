@@ -524,28 +524,11 @@
     </div>
   </div>
 
-  <!-- METADATA CARD -->
+  <!-- HASHTAG CARD -->
   <div class="metadata-card">
-    <div class="card-title">معلومات الكويز</div>
-    <div class="metadata-fields">
+    <div class="card-title">Hashtags / ملاحظات</div>
+    <div class="metadata-fields" style="grid-template-columns:1fr;">
       <div class="field-group">
-        <label>Subject</label>
-        <input type="text" id="meta-subject" placeholder="e.g. Anatomy" oninput="schedSave()">
-      </div>
-      <div class="field-group">
-        <label>Year</label>
-        <input type="text" id="meta-year" placeholder="e.g. First Year" oninput="schedSave()">
-      </div>
-      <div class="field-group">
-        <label>Foundation / Term</label>
-        <input type="text" id="meta-foundation" placeholder="e.g. Foundation" oninput="schedSave()">
-      </div>
-      <div class="field-group">
-        <label>Topic Name</label>
-        <input type="text" id="meta-topic" placeholder="e.g. Vertebral Column" oninput="schedSave()">
-      </div>
-      <div class="field-group" style="grid-column:1/-1;">
-        <label>Hashtags / ملاحظات</label>
         <input type="text" id="meta-hashtag" placeholder="#anatomy #firstyear أو أي ملاحظات للجروب" oninput="schedSave()">
       </div>
     </div>
@@ -654,8 +637,6 @@
       try {
         const slim = {
           token: data.token, group: data.group,
-          subject: data.subject, year: data.year,
-          foundation: data.foundation, topic: data.topic,
           hashtag: data.hashtag,
           questions: data.questions.map(q => {
             const copy = Object.assign({}, q);
@@ -679,10 +660,6 @@
       const data = JSON.parse(raw);
       if (data.token)      document.getElementById('cfg-token').value       = data.token;
       if (data.group)      document.getElementById('cfg-group').value       = data.group;
-      if (data.subject)    document.getElementById('meta-subject').value    = data.subject;
-      if (data.year)       document.getElementById('meta-year').value       = data.year;
-      if (data.foundation) document.getElementById('meta-foundation').value = data.foundation;
-      if (data.topic)      document.getElementById('meta-topic').value      = data.topic;
       if (data.hashtag)    document.getElementById('meta-hashtag').value    = data.hashtag;
 
       if (data.questions && data.questions.length > 0) {
@@ -1197,10 +1174,6 @@
   function buildBotJSON() {
     const token      = document.getElementById('cfg-token').value.trim();
     const group      = document.getElementById('cfg-group').value.trim();
-    const subject    = document.getElementById('meta-subject').value.trim();
-    const year       = document.getElementById('meta-year').value.trim();
-    const foundation = document.getElementById('meta-foundation').value.trim();
-    const topic      = document.getElementById('meta-topic').value.trim();
     const hashtag    = document.getElementById('meta-hashtag').value.trim();
 
     const questions = [];
@@ -1219,7 +1192,7 @@
       questions.push(q);
     });
 
-    return { token, group, subject, year, foundation, topic, hashtag, questions };
+    return { token, group, hashtag, questions };
   }
 
   /* ── Telegram helpers ─────────────────────────────── */
@@ -1227,19 +1200,52 @@
   function _grp() { return document.getElementById('cfg-group').value.trim(); }
   function _delay(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
 
+  async function _telegramRequest(url, options, label) {
+    const maxRetries = 5;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const res = await fetch(url, options);
+      if (res.ok) return;
+
+      const body = await res.text().catch(() => '');
+      let telegramDescription = '';
+      let retryAfter = 2;
+      try {
+        const parsed = JSON.parse(body);
+        telegramDescription = parsed.description || '';
+        if (parsed.parameters && Number.isFinite(parsed.parameters.retry_after)) {
+          retryAfter = Math.max(1, parsed.parameters.retry_after);
+        }
+      } catch (e) {
+        // Keep the safe default delay when Telegram does not return JSON.
+      }
+
+      if (res.status === 429 && attempt < maxRetries) {
+        await _delay((retryAfter * 1000) + 250);
+        continue;
+      }
+
+      if (res.status === 403) {
+        throw new Error(
+          label + ' 403: ' +
+          (telegramDescription ||
+            'Telegram رفض الإرسال. تأكد أن البوت عضو/مشرف ولديه صلاحية إرسال الرسائل والاستطلاعات في الجروب أو القناة.')
+        );
+      }
+
+      throw new Error(label + ' ' + res.status + ': ' + (telegramDescription || body));
+    }
+  }
+
   async function _sendMsg(text) {
-    const res = await fetch(
+    await _telegramRequest(
       'https://api.telegram.org/bot' + _tok() + '/sendMessage',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: _grp(), text: text })
-      }
+      },
+      'sendMessage'
     );
-    if (!res.ok) {
-      const e = await res.text().catch(() => '');
-      throw new Error('sendMessage ' + res.status + ': ' + e);
-    }
   }
 
   async function _sendPhoto(dataUrl, caption) {
@@ -1249,18 +1255,15 @@
     form.append('chat_id', _grp());
     form.append('photo',   blob, 'question_image.jpg');  // photo = inline display
     form.append('caption', caption);
-    const res = await fetch(
+    await _telegramRequest(
       'https://api.telegram.org/bot' + _tok() + '/sendPhoto',
-      { method: 'POST', body: form }
+      { method: 'POST', body: form },
+      'sendPhoto'
     );
-    if (!res.ok) {
-      const e = await res.text().catch(() => '');
-      throw new Error('sendPhoto ' + res.status + ': ' + e);
-    }
   }
 
   async function _sendPoll(question, options, correctIndex) {
-    const res = await fetch(
+    await _telegramRequest(
       'https://api.telegram.org/bot' + _tok() + '/sendPoll',
       {
         method: 'POST',
@@ -1273,12 +1276,9 @@
           correct_option_id: correctIndex
           // is_anonymous لم يُحدَّد — يشتغل في القنوات والجروبات
         })
-      }
+      },
+      'sendPoll'
     );
-    if (!res.ok) {
-      const e = await res.text().catch(() => '');
-      throw new Error('sendPoll ' + res.status + ': ' + e);
-    }
   }
 
   /* ── Send to Group ────────────────────────────────── */
@@ -1290,16 +1290,7 @@
       return;
     }
 
-    const subject    = document.getElementById('meta-subject').value.trim();
-    const year       = document.getElementById('meta-year').value.trim();
-    const foundation = document.getElementById('meta-foundation').value.trim();
-    const topic      = document.getElementById('meta-topic').value.trim();
     const hashtag    = document.getElementById('meta-hashtag').value.trim();
-
-    if (!subject || !year || !foundation || !topic) {
-      showToast('Fill Subject, Year, Foundation & Topic first!');
-      return;
-    }
 
     const data = buildBotJSON();
     if (!data.questions.length) { showToast('Add at least one question first'); return; }
@@ -1323,17 +1314,12 @@
     showToast('📤 جاري الإرسال للجروب…');
 
     try {
-      // ── رسالة التفاصيل ──
-      const details = '📚 المادة: ' + subject + '\n' +
-                      '📅 السنة: ' + year + '\n' +
-                      '🏫 الفاونديشن: ' + foundation + '\n' +
-                      '📝 الموضوع: ' + topic + '\n' +
-                      '❓ عدد الأسئلة: ' + total +
-                      (hashtag ? '\n\n' + hashtag : '');
-      await _sendMsg(details);
-      await _delay(1000);
+      if (hashtag) {
+        await _sendMsg(hashtag);
+        await _delay(1000);
+      }
 
-      // ── لكل سؤال: صورة (لو فيه) ← 3s ← poll ← 3s ──
+      // ── لكل سؤال: صورة (لو فيه) ← 1s ← poll ← 1s ──
       for (let i = 0; i < data.questions.length; i++) {
         const q   = data.questions[i];
         const num = i + 1;
@@ -1341,7 +1327,7 @@
         showToast('📤 سؤال ' + num + ' / ' + total + '…');
 
         if (q.image) {
-          await _sendPhoto(q.image, 'صورة السؤال رقم ' + num);
+          await _sendPhoto(q.image, '');
           await _delay(1000);
         }
 
@@ -1360,7 +1346,8 @@
 
       showToast('✅ تم إرسال ' + total + ' سؤال للجروب بنجاح');
     } catch (err) {
-      showToast('⚠️ فشل الإرسال: ' + err.message.slice(0, 55));
+      const message = String(err && err.message ? err.message : err);
+      showToast('⚠️ فشل الإرسال: ' + message.slice(0, 110));
       console.error('Telegram send error:', err);
     }
   }
