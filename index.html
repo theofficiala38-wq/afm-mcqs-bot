@@ -243,6 +243,16 @@
 
   .preview-dot { width: 7px; height: 7px; background: #f97316; border-radius: 50%; }
 
+  .single-export-btn {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid #bfdbfe; border-radius: 5px;
+    background: #eff6ff; cursor: pointer;
+    font-size: 10px; color: #2563eb; font-weight: 600;
+    transition: background 0.15s;
+  }
+  .single-export-btn:hover { background: #dbeafe; }
+
   .delete-btn {
     width: 26px; height: 26px;
     display: flex; align-items: center; justify-content: center;
@@ -820,6 +830,9 @@
           <span class="autoimg-badge" id="q-autoimg-${id}" style="display:none;">🖼️ هيتحول لصورة</span>
         </div>
         <div class="question-header-right">
+          <button class="single-export-btn" onclick="exportSingleQuestion(${id})" title="Download JSON for this question only">
+            ⇩ JSON
+          </button>
           <button class="preview-btn" onclick="previewQuestion(${id})">
             <span class="preview-dot"></span>Preview
           </button>
@@ -1346,10 +1359,9 @@
      AUTO IMAGE RENDERING
      When a question's text (or any option's text) exceeds the
      Telegram poll limits, Telegram would silently truncate it.
-     Instead we render the full question + options onto a plain
-     white image (combined with the user's uploaded image, if any),
-     then shrink the poll text down to "Q<n>" / single letters so
-     Telegram accepts it while the image carries the real content.
+     The source question/options/image are kept intact. We add a
+     separate poll_image and safe poll_* values only to the exported
+     JSON, so PDF export and later editing still see the real content.
      ================================================================ */
 
   function needsImageRender(q) {
@@ -1414,31 +1426,22 @@
     });
   }
 
-  // Builds one white composite image containing the full question text,
-  // all option texts (labelled A/B/C/...), and — if the question already
-  // has an uploaded image — that image placed alongside the text.
+  // Builds a high-resolution, text-only card. The user's uploaded image is
+  // deliberately NOT placed here; the bot sends it as a separate photo.
   async function generateQuestionImage(q) {
-    const CANVAS_W   = 1000;
-    const PAD        = 40;
-    const GAP        = 24;
-    const Q_FONT_SIZE   = 30;
-    const OPT_FONT_SIZE = 24;
+    const CANVAS_W   = 1600;
+    const PAD        = 84;
+    const GAP        = 38;
+    const Q_FONT_SIZE   = 50;
+    const OPT_FONT_SIZE = 38;
     const Q_LINE_H   = Q_FONT_SIZE * 1.4;
     const OPT_LINE_H = OPT_FONT_SIZE * 1.4;
-    const OPT_GAP    = 12;
-    const IMG_COL_W  = 380;
-    const IMG_MAX_H  = 760;
+    const OPT_GAP    = 18;
+    const OPTION_PAD_Y = 24;
+    const OPTION_RADIUS = 18;
+    const textColW = CANVAS_W - PAD * 2;
 
     const rtl = containsArabic(q.question) || (q.options || []).some(containsArabic);
-
-    const hasImage = !!q.image;
-    let uploadedImg = null;
-    if (hasImage) {
-      try { uploadedImg = await loadImageEl(q.image); }
-      catch (e) { uploadedImg = null; }
-    }
-
-    const textColW = (uploadedImg ? CANVAS_W - IMG_COL_W - PAD * 3 : CANVAS_W - PAD * 2);
 
     // Measuring canvas (sized once we know the final height)
     const measure = document.createElement('canvas');
@@ -1450,72 +1453,67 @@
     mctx.font = `400 ${OPT_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
     const optionBlocks = (q.options || []).map((opt, i) => {
       const label = `${LETTERS[i]}) `;
-      // Wrap using full option text prefixed with its letter label.
       const lines = wrapCanvasText(mctx, label + (opt || ''), textColW);
       return lines;
     });
 
     let textBlockHeight = qLines.length * Q_LINE_H + GAP;
-    optionBlocks.forEach(lines => { textBlockHeight += lines.length * OPT_LINE_H + OPT_GAP; });
+    optionBlocks.forEach(lines => {
+      textBlockHeight += lines.length * OPT_LINE_H + OPTION_PAD_Y * 2 + OPT_GAP;
+    });
 
-    // Scale the uploaded image down to fit the image column.
-    let imgDrawW = 0, imgDrawH = 0;
-    if (uploadedImg) {
-      imgDrawW = IMG_COL_W;
-      imgDrawH = uploadedImg.height * (IMG_COL_W / uploadedImg.width);
-      if (imgDrawH > IMG_MAX_H) {
-        imgDrawH = IMG_MAX_H;
-        imgDrawW = uploadedImg.width * (IMG_MAX_H / uploadedImg.height);
-      }
-    }
-
-    const contentHeight = uploadedImg ? Math.max(textBlockHeight, imgDrawH) : textBlockHeight;
     const canvas = document.createElement('canvas');
     canvas.width  = CANVAS_W;
-    canvas.height = Math.ceil(contentHeight + PAD * 2);
+    canvas.height = Math.ceil(textBlockHeight + PAD * 2);
     const ctx = canvas.getContext('2d');
 
-    // Background
-    ctx.fillStyle = '#ffffff';
+    // Soft blue background with a clear accent, designed to stay readable
+    // after Telegram's image compression.
+    ctx.fillStyle = '#f4f8fc';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Column layout: for RTL content put the image on the left and
-    // text on the right (so the text starts from the "natural" side);
-    // for LTR content, image on the right, text on the left.
-    let textX, textRight, imgX;
-    if (uploadedImg) {
-      if (rtl) {
-        imgX    = PAD;
-        textX   = PAD + IMG_COL_W + PAD;
-        textRight = textX + textColW;
-      } else {
-        textX   = PAD;
-        textRight = textX + textColW;
-        imgX    = textRight + PAD;
-      }
-      const imgY = PAD + (contentHeight - imgDrawH) / 2;
-      ctx.drawImage(uploadedImg, imgX, imgY, imgDrawW, imgDrawH);
-    } else {
-      textX = PAD;
-      textRight = textX + textColW;
-    }
+    ctx.fillStyle = '#2563eb';
+    ctx.fillRect(0, 0, canvas.width, 14);
 
     ctx.textBaseline = 'top';
     ctx.direction = rtl ? 'rtl' : 'ltr';
     ctx.textAlign = rtl ? 'right' : 'left';
-    const drawX = rtl ? textRight : textX;
+    const drawX = rtl ? CANVAS_W - PAD : PAD;
 
     let y = PAD;
-    ctx.fillStyle = '#111111';
+    ctx.fillStyle = '#17324d';
     ctx.font = `700 ${Q_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
     qLines.forEach(line => { ctx.fillText(line, drawX, y); y += Q_LINE_H; });
     y += GAP;
 
-    ctx.fillStyle = '#333333';
     ctx.font = `400 ${OPT_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
-    optionBlocks.forEach(lines => {
-      lines.forEach(line => { ctx.fillText(line, drawX, y); y += OPT_LINE_H; });
-      y += OPT_GAP;
+    optionBlocks.forEach((lines, optionIndex) => {
+      const boxHeight = lines.length * OPT_LINE_H + OPTION_PAD_Y * 2;
+      const boxX = PAD;
+      const boxY = y;
+
+      ctx.fillStyle = optionIndex % 2 === 0 ? '#ffffff' : '#eaf2fb';
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, textColW, boxHeight, OPTION_RADIUS);
+      ctx.fill();
+
+      ctx.strokeStyle = '#c6d8eb';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // A colored marker makes choices visually distinct without competing
+      // with the question text.
+      ctx.fillStyle = '#3b82f6';
+      ctx.beginPath();
+      ctx.arc(rtl ? CANVAS_W - PAD - 22 : PAD + 22, boxY + boxHeight / 2, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#334e68';
+      let lineY = boxY + OPTION_PAD_Y;
+      lines.forEach(line => {
+        ctx.fillText(line, drawX, lineY);
+        lineY += OPT_LINE_H;
+      });
+      y += boxHeight + OPT_GAP;
     });
 
     return canvas.toDataURL('image/png');
@@ -1561,6 +1559,65 @@
   }
 
   /* ── Export Bot JSON ──────────────────────────────── */
+  async function exportSingleQuestion(id) {
+    const subject    = document.getElementById('meta-subject').value.trim();
+    const year       = document.getElementById('meta-year').value.trim();
+    const foundation = document.getElementById('meta-foundation').value.trim();
+    const topic      = document.getElementById('meta-topic').value.trim();
+    if (!subject || !year || !foundation || !topic) {
+      showToast('Fill Subject, Year, Foundation & Topic first!');
+      return;
+    }
+
+    const card = document.getElementById(`q-${id}`);
+    if (!card) return;
+    const qText = card.querySelector('.question-textarea').value.trim();
+    const options = Array.from(card.querySelectorAll('.option-input'))
+      .map(input => input.value.trim());
+    if (!qText) {
+      showToast('❌ Add the question text first');
+      return;
+    }
+    if (options.length < 2 || options.some(option => !option)) {
+      showToast('❌ Fill all options or remove the empty ones');
+      return;
+    }
+
+    const number = parseInt(card.querySelector('.q-number').textContent, 10) || id;
+    const imgEl = card.querySelector('.image-preview-wrap img');
+    const q = {
+      id: number,
+      question: qText,
+      options,
+      correct: card.dataset.correct || 'A',
+    };
+    if (imgEl && imgEl.src && imgEl.src.startsWith('data:')) q.image = imgEl.src;
+
+    if (needsImageRender(q)) {
+      showToast('🖼️ جاري تجهيز صورة النص…');
+      try {
+        q.poll_image = await generateQuestionImage(q);
+        q.poll_question = `Q${number}`;
+        q.poll_options = LETTERS.slice(0, q.options.length);
+      } catch (e) {
+        console.error('single question image generation failed', e);
+        showToast('❌ فشل إنشاء صورة السؤال');
+        return;
+      }
+    }
+
+    const data = { subject, year, foundation, topic, questions: [q] };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const slug = s => s.trim().replace(/\s+/g, '_');
+    const filename = `${slug(year)}_${slug(foundation)}_${slug(subject)}_${slug(topic)}_question_${number}.json`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast(`✅ تم تنزيل JSON للسؤال ${number}`);
+  }
+
   // NOTE: already async (needed for Telegram sendDocument + image generation below).
   async function exportZIP() {
     const subject    = document.getElementById('meta-subject').value.trim();
@@ -1593,17 +1650,16 @@
     const mode   = modeEl ? modeEl.value : 'download';
 
     // Any question whose text (or any option) exceeds Telegram's poll
-    // limits gets rendered onto a white image instead — the poll question
-    // becomes "Q<n>" and the options collapse to plain letters (A, B, C…)
-    // so Telegram never truncates the real content.
+    // limits gets a separate, high-resolution text image. The real source
+    // fields remain untouched; only poll_* fields are added for delivery.
     const toRender = data.questions.filter(needsImageRender);
     if (toRender.length > 0) {
       showToast(`🖼️ جاري تجهيز ${toRender.length} سؤال كصورة…`);
       for (const q of toRender) {
         try {
-          q.image    = await generateQuestionImage(q);
-          q.question = `Q${q.id}`;
-          q.options  = LETTERS.slice(0, q.options.length);
+          q.poll_image    = await generateQuestionImage(q);
+          q.poll_question = `Q${q.id}`;
+          q.poll_options  = LETTERS.slice(0, q.options.length);
         } catch (e) {
           console.error('generateQuestionImage failed for Q' + q.id, e);
           showToast(`❌ فشل إنشاء صورة للسؤال ${q.id}`);
@@ -1616,10 +1672,10 @@
     // since the block above already converts over-limit questions).
     let truncWarnings = [];
     data.questions.forEach(q => {
-      if (q.question.length > Q_LIMIT)
+      if (q.question.length > Q_LIMIT && !q.poll_question)
         truncWarnings.push(`Q${q.id}: question text exceeds ${Q_LIMIT} chars`);
       q.options.forEach((o, i) => {
-        if (o.length > OPT_LIMIT)
+        if (o.length > OPT_LIMIT && !q.poll_options)
           truncWarnings.push(`Q${q.id} option ${LETTERS[i]}: exceeds ${OPT_LIMIT} chars`);
       });
     });
