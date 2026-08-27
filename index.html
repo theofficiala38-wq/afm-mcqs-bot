@@ -1649,26 +1649,37 @@
     // reject navigator.share() with "Permission denied". So instead of
     // sharing automatically, we show a confirm button — tapping IT is a
     // fresh, direct user gesture that satisfies the browser's requirement.
+    //
+    // ALSO: Chromium only allows sharing files with a small allow-listed
+    // set of extensions (common audio/image/video/text types) — ".json" is
+    // NOT on that list, so navigator.share() rejects it with the same
+    // "Permission denied" error no matter what. We work around this by
+    // sharing the exact same JSON content under a ".txt" filename instead
+    // (the content itself is untouched — still valid JSON, just with a
+    // ".txt" name/mimetype so Chrome agrees to share it). Download and Bot
+    // delivery still use the real ".json" filename, unaffected.
     if (mode === 'share') {
       if (!navigator.share) {
         showToast('❌ المتصفح ده مش بيدعم المشاركة أصلاً (جرب كروم/سفاري على الموبايل)');
         return;
       }
-      const file = new File([blob], filename, { type: 'application/json' });
+      const shareFilename = filename.replace(/\.json$/i, '.txt');
+      const file = new File([blob], shareFilename, { type: 'text/plain' });
       const shareData = { files: [file] };
       if (!(navigator.canShare && navigator.canShare(shareData))) {
         showToast('❌ المتصفح ده مش بيدعم مشاركة الملفات (جرب من الموبايل بدل الديسكتوب)');
         return;
       }
       window.__pendingShareData = shareData;
-      window.__pendingShareLabel = filename;
+      window.__pendingShareLabel = shareFilename;
       openModal(`
         <div class="modal-header">
           <span class="modal-title">الملف جاهز</span>
           <button class="modal-close" onclick="closeModal()">×</button>
         </div>
         <p style="font-size:13px;color:#374151;margin-bottom:16px;line-height:1.6;">
-          الملف <strong>${filename}</strong> جاهز للمشاركة.
+          الملف <strong>${shareFilename}</strong> جاهز للمشاركة.<br>
+          <span style="color:#9ca3af;">(المحتوى JSON زي ما هو، الامتداد بس txt عشان كروم يسمح بالمشاركة)</span>
         </p>
         <div style="display:flex;justify-content:flex-end;gap:8px;">
           <button class="modal-btn secondary" onclick="closeModal()">إلغاء</button>
