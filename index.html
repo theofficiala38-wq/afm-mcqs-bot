@@ -1589,6 +1589,9 @@
       return;
     }
 
+    const modeEl = document.querySelector('input[name="export-mode"]:checked');
+    const mode   = modeEl ? modeEl.value : 'download';
+
     // Any question whose text (or any option) exceeds Telegram's poll
     // limits gets rendered onto a white image instead — the poll question
     // becomes "Q<n>" and the options collapse to plain letters (A, B, C…)
@@ -1629,9 +1632,6 @@
     const slug     = s => s.trim().replace(/\s+/g, '_');
     const filename = `${slug(year)}_${slug(foundation)}_${slug(subject)}_${slug(topic)}.json`;
 
-    const modeEl = document.querySelector('input[name="export-mode"]:checked');
-    const mode   = modeEl ? modeEl.value : 'download';
-
     // ── Mode: download the JSON file only ──
     if (mode === 'download') {
       const a   = document.createElement('a');
@@ -1644,25 +1644,37 @@
     }
 
     // ── Mode: share the file directly (any app — WhatsApp, Telegram, etc.) ──
+    // The processing above (image rendering) can take a moment, which makes
+    // strict browsers (esp. iOS Safari) invalidate the original click and
+    // reject navigator.share() with "Permission denied". So instead of
+    // sharing automatically, we show a confirm button — tapping IT is a
+    // fresh, direct user gesture that satisfies the browser's requirement.
     if (mode === 'share') {
-      const file = new File([blob], filename, { type: 'application/json' });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({
-            files: [file],
-            title: filename,
-            text: `📁 ${filename}\n📚 ${subject} | ${year} | ${foundation}\n📝 ${topic}\n❓ ${data.questions.length} سؤال`
-          });
-          showToast(`✅ تم فتح قائمة المشاركة لـ ${filename}`);
-        } catch (err) {
-          if (err.name !== 'AbortError') {
-            showToast('❌ فشلت المشاركة');
-            console.error('Share error:', err);
-          }
-        }
-      } else {
-        showToast('❌ المتصفح ده مش بيدعم مشاركة الملفات مباشرة');
+      if (!navigator.share) {
+        showToast('❌ المتصفح ده مش بيدعم المشاركة أصلاً (جرب كروم/سفاري على الموبايل)');
+        return;
       }
+      const file = new File([blob], filename, { type: 'application/json' });
+      const shareData = { files: [file] };
+      if (!(navigator.canShare && navigator.canShare(shareData))) {
+        showToast('❌ المتصفح ده مش بيدعم مشاركة الملفات (جرب من الموبايل بدل الديسكتوب)');
+        return;
+      }
+      window.__pendingShareData = shareData;
+      window.__pendingShareLabel = filename;
+      openModal(`
+        <div class="modal-header">
+          <span class="modal-title">الملف جاهز</span>
+          <button class="modal-close" onclick="closeModal()">×</button>
+        </div>
+        <p style="font-size:13px;color:#374151;margin-bottom:16px;line-height:1.6;">
+          الملف <strong>${filename}</strong> جاهز للمشاركة.
+        </p>
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button class="modal-btn secondary" onclick="closeModal()">إلغاء</button>
+          <button class="modal-btn" style="background:#3b82f6;color:#fff;"
+                  onclick="confirmShareFile()">شارك الآن</button>
+        </div>`);
       return;
     }
 
@@ -1715,6 +1727,25 @@
     schedSave();
     addQuestion();
     showToast('تم مسح جميع الأسئلة ✓');
+  }
+
+  /* ── Confirm & fire the Web Share (called directly by a fresh click) ── */
+  async function confirmShareFile() {
+    closeModal();
+    const shareData = window.__pendingShareData;
+    const label     = window.__pendingShareLabel || 'الملف';
+    if (!shareData) return;
+    try {
+      await navigator.share(shareData);
+      showToast(`✅ تم فتح قائمة المشاركة لـ ${label}`);
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        showToast(`❌ فشلت المشاركة: ${err.name} — ${err.message || ''}`);
+        console.error('Share error:', err);
+      }
+    } finally {
+      window.__pendingShareData = null;
+    }
   }
 
   /* ── Init ─────────────────────────────────────────── */
