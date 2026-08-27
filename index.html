@@ -572,6 +572,10 @@
         <input type="radio" name="export-mode" id="mode-send" value="send" onchange="saveBotSettings()">
         إرسال مباشر للبوت
       </label>
+      <label style="display:flex; align-items:center; gap:5px; cursor:pointer;">
+        <input type="radio" name="export-mode" id="mode-share" value="share" onchange="saveBotSettings()">
+        مشاركة الملف
+      </label>
     </div>
   </div>
 
@@ -727,6 +731,7 @@
       if (s.token)  document.getElementById('bot-token').value  = s.token;
       if (s.chatId) document.getElementById('bot-chatid').value = s.chatId;
       if (s.mode === 'send') document.getElementById('mode-send').checked = true;
+      else if (s.mode === 'share') document.getElementById('mode-share').checked = true;
       else document.getElementById('mode-download').checked = true;
     } catch (e) {}
   }
@@ -1635,6 +1640,29 @@
       a.click();
       URL.revokeObjectURL(a.href);
       showToast(`✅ ${filename} downloaded`);
+      return;
+    }
+
+    // ── Mode: share the file directly (any app — WhatsApp, Telegram, etc.) ──
+    if (mode === 'share') {
+      const file = new File([blob], filename, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: filename,
+            text: `📁 ${filename}\n📚 ${subject} | ${year} | ${foundation}\n📝 ${topic}\n❓ ${data.questions.length} سؤال`
+          });
+          showToast(`✅ تم فتح قائمة المشاركة لـ ${filename}`);
+        } catch (err) {
+          if (err.name !== 'AbortError') {
+            showToast('❌ فشلت المشاركة');
+            console.error('Share error:', err);
+          }
+        }
+      } else {
+        showToast('❌ المتصفح ده مش بيدعم مشاركة الملفات مباشرة');
+      }
       return;
     }
 
