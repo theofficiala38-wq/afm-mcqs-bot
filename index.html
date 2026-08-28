@@ -243,16 +243,6 @@
 
   .preview-dot { width: 7px; height: 7px; background: #f97316; border-radius: 50%; }
 
-  .single-export-btn {
-    display: flex; align-items: center; gap: 4px;
-    padding: 4px 8px;
-    border: 1px solid #bfdbfe; border-radius: 5px;
-    background: #eff6ff; cursor: pointer;
-    font-size: 10px; color: #2563eb; font-weight: 600;
-    transition: background 0.15s;
-  }
-  .single-export-btn:hover { background: #dbeafe; }
-
   .delete-btn {
     width: 26px; height: 26px;
     display: flex; align-items: center; justify-content: center;
@@ -525,7 +515,7 @@
 
   <span class="nav-saved" id="nav-saved">● Saved</span>
 
-  <button class="nav-btn-zip" onclick="exportZIP()" title="Download the JSON or send it directly to the bot, based on your settings below">
+  <button class="nav-btn-zip" onclick="exportZIP()" title="Download the JSON + PDF, or send both directly to the bot, based on your settings below">
     <svg class="icon-sm" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.5">
       <path d="M8 2v9M5 8l3 3 3-3M2 13h12" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
@@ -654,6 +644,7 @@
 <input type="file" id="bulk-img-input" accept="image/*" multiple style="display:none" onchange="onBulkImagesSelected(this)">
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
   /* ── State ────────────────────────────────────────── */
   let questionCounter = 0;
@@ -830,9 +821,6 @@
           <span class="autoimg-badge" id="q-autoimg-${id}" style="display:none;">🖼️ هيتحول لصورة</span>
         </div>
         <div class="question-header-right">
-          <button class="single-export-btn" onclick="exportSingleQuestion(${id})" title="Download JSON for this question only">
-            ⇩ JSON
-          </button>
           <button class="preview-btn" onclick="previewQuestion(${id})">
             <span class="preview-dot"></span>Preview
           </button>
@@ -1359,9 +1347,10 @@
      AUTO IMAGE RENDERING
      When a question's text (or any option's text) exceeds the
      Telegram poll limits, Telegram would silently truncate it.
-     The source question/options/image are kept intact. We add a
-     separate poll_image and safe poll_* values only to the exported
-     JSON, so PDF export and later editing still see the real content.
+     Instead we render the full question + options onto a plain
+     white image (combined with the user's uploaded image, if any),
+     then shrink the poll text down to "Q<n>" / single letters so
+     Telegram accepts it while the image carries the real content.
      ================================================================ */
 
   function needsImageRender(q) {
@@ -1426,97 +1415,519 @@
     });
   }
 
-  // Builds a high-resolution, text-only card. The user's uploaded image is
-  // deliberately NOT placed here; the bot sends it as a separate photo.
+  // Draws a rounded rectangle path (compatible fallback for ctx.roundRect,
+  // which isn't available in every environment).
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x,     y + h, r);
+    ctx.arcTo(x,     y + h, x,     y,     r);
+    ctx.arcTo(x,     y,     x + w, y,     r);
+    ctx.closePath();
+  }
+
+  // Builds one white "bubble sheet" style composite image: the question in
+  // its own highlighted card, the uploaded image (if any) shown large and
+  // uncropped underneath it, then each option in its own row card with a
+  // circular A/B/C/D badge — so the Telegram fallback image looks like a
+  // clean, organized quiz card instead of plain stacked text.
   async function generateQuestionImage(q) {
-    const CANVAS_W   = 1600;
-    const PAD        = 84;
-    const GAP        = 38;
-    const Q_FONT_SIZE   = 50;
-    const OPT_FONT_SIZE = 38;
-    const Q_LINE_H   = Q_FONT_SIZE * 1.4;
-    const OPT_LINE_H = OPT_FONT_SIZE * 1.4;
-    const OPT_GAP    = 18;
-    const OPTION_PAD_Y = 24;
-    const OPTION_RADIUS = 18;
-    const textColW = CANVAS_W - PAD * 2;
+    const CANVAS_W     = 1000;
+    const PAD          = 36;
+    const SECTION_GAP  = 22;
+
+    const Q_FONT_SIZE   = 30;
+    const OPT_FONT_SIZE = 25;
+    const Q_LINE_H      = Q_FONT_SIZE * 1.4;
+    const OPT_LINE_H    = OPT_FONT_SIZE * 1.38;
+
+    const Q_CARD_PAD    = 28;
+    const OPT_ROW_PAD_X = 22;
+    const OPT_ROW_PAD_Y = 16;
+    const OPT_ROW_GAP   = 14;
+    const BADGE_SIZE    = 46;
+    const BADGE_TEXT_GAP = 18;
+
+    const IMG_MAX_H = 480;
 
     const rtl = containsArabic(q.question) || (q.options || []).some(containsArabic);
+
+    const hasImage = !!q.image;
+    let uploadedImg = null;
+    if (hasImage) {
+      try { uploadedImg = await loadImageEl(q.image); }
+      catch (e) { uploadedImg = null; }
+    }
 
     // Measuring canvas (sized once we know the final height)
     const measure = document.createElement('canvas');
     const mctx = measure.getContext('2d');
 
+    // ── Question card layout ──
+    const qTextColW = CANVAS_W - PAD * 2 - Q_CARD_PAD * 2;
     mctx.font = `700 ${Q_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
-    const qLines = wrapCanvasText(mctx, q.question || '', textColW);
+    const qLines = wrapCanvasText(mctx, q.question || '', qTextColW);
+    const qCardH = qLines.length * Q_LINE_H + Q_CARD_PAD * 2;
 
-    mctx.font = `400 ${OPT_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
-    const optionBlocks = (q.options || []).map((opt, i) => {
-      const label = `${LETTERS[i]}) `;
-      const lines = wrapCanvasText(mctx, label + (opt || ''), textColW);
-      return lines;
+    // ── Uploaded image sizing (large, centered, never squeezed into a column) ──
+    let imgDrawW = 0, imgDrawH = 0;
+    if (uploadedImg) {
+      const maxW = CANVAS_W - PAD * 2;
+      imgDrawW = maxW;
+      imgDrawH = uploadedImg.height * (maxW / uploadedImg.width);
+      if (imgDrawH > IMG_MAX_H) {
+        imgDrawH = IMG_MAX_H;
+        imgDrawW = uploadedImg.width * (IMG_MAX_H / uploadedImg.height);
+      }
+    }
+
+    // ── Option row layout ──
+    const optTextColW = CANVAS_W - PAD * 2 - OPT_ROW_PAD_X * 2 - BADGE_SIZE - BADGE_TEXT_GAP;
+    mctx.font = `500 ${OPT_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
+    const optionRows = (q.options || []).map((opt, i) => {
+      const lines = wrapCanvasText(mctx, opt || '', optTextColW);
+      const textH = lines.length * OPT_LINE_H;
+      const rowH  = Math.max(BADGE_SIZE, textH) + OPT_ROW_PAD_Y * 2;
+      return { letter: LETTERS[i], lines, rowH };
     });
 
-    let textBlockHeight = qLines.length * Q_LINE_H + GAP;
-    optionBlocks.forEach(lines => {
-      textBlockHeight += lines.length * OPT_LINE_H + OPTION_PAD_Y * 2 + OPT_GAP;
-    });
+    // ── Total canvas height ──
+    let contentH = qCardH;
+    if (uploadedImg) contentH += SECTION_GAP + imgDrawH;
+    optionRows.forEach(row => { contentH += SECTION_GAP + row.rowH; });
 
     const canvas = document.createElement('canvas');
     canvas.width  = CANVAS_W;
-    canvas.height = Math.ceil(textBlockHeight + PAD * 2);
+    canvas.height = Math.ceil(contentH + PAD * 2);
     const ctx = canvas.getContext('2d');
 
-    // Soft blue background with a clear accent, designed to stay readable
-    // after Telegram's image compression.
-    ctx.fillStyle = '#f4f8fc';
+    // Background
+    ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#2563eb';
-    ctx.fillRect(0, 0, canvas.width, 14);
+
+    let y = PAD;
+
+    // ── Question card (light blue, matches app accent) ──
+    roundRectPath(ctx, PAD, y, CANVAS_W - PAD * 2, qCardH, 14);
+    ctx.fillStyle = '#eff6ff';
+    ctx.fill();
+    ctx.strokeStyle = '#bfdbfe';
+    ctx.lineWidth = 2;
+    ctx.stroke();
 
     ctx.textBaseline = 'top';
     ctx.direction = rtl ? 'rtl' : 'ltr';
     ctx.textAlign = rtl ? 'right' : 'left';
-    const drawX = rtl ? CANVAS_W - PAD : PAD;
-
-    let y = PAD;
-    ctx.fillStyle = '#17324d';
+    const qDrawX = rtl ? (CANVAS_W - PAD - Q_CARD_PAD) : (PAD + Q_CARD_PAD);
+    ctx.fillStyle = '#1e3a8a';
     ctx.font = `700 ${Q_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
-    qLines.forEach(line => { ctx.fillText(line, drawX, y); y += Q_LINE_H; });
-    y += GAP;
+    let qy = y + Q_CARD_PAD;
+    qLines.forEach(line => { ctx.fillText(line, qDrawX, qy); qy += Q_LINE_H; });
 
-    ctx.font = `400 ${OPT_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
-    optionBlocks.forEach((lines, optionIndex) => {
-      const boxHeight = lines.length * OPT_LINE_H + OPTION_PAD_Y * 2;
-      const boxX = PAD;
-      const boxY = y;
+    y += qCardH;
 
-      ctx.fillStyle = optionIndex % 2 === 0 ? '#ffffff' : '#eaf2fb';
-      ctx.beginPath();
-      ctx.roundRect(boxX, boxY, textColW, boxHeight, OPTION_RADIUS);
+    // ── Uploaded image, large and centered ──
+    if (uploadedImg) {
+      y += SECTION_GAP;
+      const imgX = PAD + (CANVAS_W - PAD * 2 - imgDrawW) / 2;
+      roundRectPath(ctx, imgX - 4, y - 4, imgDrawW + 8, imgDrawH + 8, 10);
+      ctx.fillStyle = '#ffffff';
       ctx.fill();
+      ctx.strokeStyle = '#e5e7eb';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.drawImage(uploadedImg, imgX, y, imgDrawW, imgDrawH);
+      y += imgDrawH;
+    }
 
-      ctx.strokeStyle = '#c6d8eb';
+    // ── Option rows, each with a circular letter badge ──
+    optionRows.forEach(row => {
+      y += SECTION_GAP;
+      const rowW = CANVAS_W - PAD * 2;
+      roundRectPath(ctx, PAD, y, rowW, row.rowH, 12);
+      ctx.fillStyle = '#f9fafb';
+      ctx.fill();
+      ctx.strokeStyle = '#e5e7eb';
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // A colored marker makes choices visually distinct without competing
-      // with the question text.
-      ctx.fillStyle = '#3b82f6';
+      const badgeCX = rtl ? (PAD + rowW - OPT_ROW_PAD_X - BADGE_SIZE / 2)
+                           : (PAD + OPT_ROW_PAD_X + BADGE_SIZE / 2);
+      const badgeCY = y + row.rowH / 2;
       ctx.beginPath();
-      ctx.arc(rtl ? CANVAS_W - PAD - 22 : PAD + 22, boxY + boxHeight / 2, 10, 0, Math.PI * 2);
+      ctx.arc(badgeCX, badgeCY, BADGE_SIZE / 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#3b82f6';
       ctx.fill();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.direction = 'ltr';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `700 ${Math.round(BADGE_SIZE * 0.46)}px "Segoe UI", Tahoma, Arial, sans-serif`;
+      ctx.fillText(row.letter, badgeCX, badgeCY + 1);
 
-      ctx.fillStyle = '#334e68';
-      let lineY = boxY + OPTION_PAD_Y;
-      lines.forEach(line => {
-        ctx.fillText(line, drawX, lineY);
-        lineY += OPT_LINE_H;
-      });
-      y += boxHeight + OPT_GAP;
+      const textH = row.lines.length * OPT_LINE_H;
+      const textStartY = y + (row.rowH - textH) / 2;
+      ctx.textBaseline = 'top';
+      ctx.direction = rtl ? 'rtl' : 'ltr';
+      ctx.textAlign = rtl ? 'right' : 'left';
+      const optDrawX = rtl ? (badgeCX - BADGE_SIZE / 2 - BADGE_TEXT_GAP)
+                            : (badgeCX + BADGE_SIZE / 2 + BADGE_TEXT_GAP);
+      ctx.fillStyle = '#374151';
+      ctx.font = `500 ${OPT_FONT_SIZE}px "Segoe UI", Tahoma, Arial, sans-serif`;
+      let oy = textStartY;
+      row.lines.forEach(line => { ctx.fillText(line, optDrawX, oy); oy += OPT_LINE_H; });
+
+      y += row.rowH;
     });
 
     return canvas.toDataURL('image/png');
+  }
+
+  /* ================================================================
+     PDF EXPORT
+     Builds a nicely formatted, paginated PDF with the FULL question
+     and option text — unlike the JSON/bot export, this is never
+     affected by Telegram's 300/100-char limits and never gets
+     collapsed into "Q<n>" + image. Questions with an uploaded image
+     get that image placed under the question text. Ends with a
+     3-column answer key.
+
+     TEXT MODE: any text made only of Latin/basic-Latin characters
+     (English letters, digits, common punctuation/symbols — i.e. no
+     Arabic, no Greek, no exotic Unicode) is drawn with jsPDF's real
+     native text, so it's genuinely selectable/copyable/searchable in
+     the PDF. Anything outside that safe set (Arabic text, or any
+     other script jsPDF's built-in font can't render) automatically
+     falls back to the old, proven approach — rendering that specific
+     bit onto a crisp canvas image — so it always looks exactly right,
+     it just isn't copyable. Nothing is ever silently broken either way.
+     ================================================================ */
+
+  // True only if every character is within the safe Latin-1 range that
+  // jsPDF's built-in Helvetica font can render natively as real text.
+  function isLatinSafe(str) {
+    return /^[\x00-\xFF]*$/.test(str || '');
+  }
+
+  // jsPDF's addImage needs an explicit format when given a base64 data
+  // URL directly (rather than an HTMLImageElement) — detect it here.
+  function imgFormatFromDataUrl(dataUrl) {
+    const m = /^data:image\/(png|jpe?g|webp)/i.exec(dataUrl || '');
+    if (!m) return 'JPEG';
+    const t = m[1].toLowerCase();
+    if (t === 'png') return 'PNG';
+    if (t === 'webp') return 'WEBP';
+    return 'JPEG';
+  }
+
+  // Renders one question's numbered text + lettered options onto a
+  // transparent, high-resolution canvas image (used only as a fallback
+  // for non-Latin text, e.g. Arabic) so it drops into the PDF page
+  // looking crisp and correctly shaped/directional, right next to
+  // regular native text for every other question.
+  function renderQuestionBlockImage(idx, q, contentWpt, sizes) {
+    const SCALE = 2.5; // render at ~2.5x for print-crisp text
+    const w = Math.round(contentWpt * SCALE);
+    const qSizePx = sizes.Q_SIZE * SCALE, optSizePx = sizes.OPT_SIZE * SCALE;
+    const qLhPx = qSizePx * 1.42, optLhPx = optSizePx * 1.5;
+    const optIndentPx = 26 * SCALE;
+    const FONT = '"Segoe UI", Tahoma, Arial, sans-serif';
+
+    const rtl = containsArabic(q.question) || (q.options || []).some(containsArabic);
+
+    const measure = document.createElement('canvas');
+    const mctx = measure.getContext('2d');
+    mctx.font = `700 ${qSizePx}px ${FONT}`;
+    const qText = `${idx + 1}. ${q.question || ''}`;
+    const qLines = wrapCanvasText(mctx, qText, w);
+
+    mctx.font = `400 ${optSizePx}px ${FONT}`;
+    const optLines = (q.options || []).map((opt, i) =>
+      wrapCanvasText(mctx, `${LETTERS[i]}. ${opt || ''}`, w - optIndentPx)
+    );
+
+    let hPx = qLines.length * qLhPx + 16 * SCALE;
+    optLines.forEach(lines => { hPx += lines.length * optLhPx + 8 * SCALE; });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = Math.ceil(hPx);
+    const ctx = canvas.getContext('2d');
+
+    ctx.textBaseline = 'top';
+    ctx.direction = rtl ? 'rtl' : 'ltr';
+    ctx.textAlign = rtl ? 'right' : 'left';
+    const xStart = rtl ? w : 0;
+
+    let py = 0;
+    ctx.fillStyle = '#1e3a8a';
+    ctx.font = `700 ${qSizePx}px ${FONT}`;
+    qLines.forEach(line => { ctx.fillText(line, xStart, py); py += qLhPx; });
+    py += 16 * SCALE;
+
+    ctx.fillStyle = '#374151';
+    ctx.font = `400 ${optSizePx}px ${FONT}`;
+    const optX = rtl ? (w - optIndentPx) : optIndentPx;
+    optLines.forEach(lines => {
+      lines.forEach(line => { ctx.fillText(line, optX, py); py += optLhPx; });
+      py += 8 * SCALE;
+    });
+
+    return { dataUrl: canvas.toDataURL('image/png'), heightPt: hPx / SCALE };
+  }
+
+  // Same idea as above, but for a single short line (used for the page
+  // title / subtitle / running header when those metadata fields
+  // contain non-Latin text, e.g. an Arabic subject or topic name).
+  function renderLineImage(text, sizePt, bold, colorHex, maxWpt, align) {
+    const SCALE = 2.5;
+    const sizePx = sizePt * SCALE;
+    const FONT = '"Segoe UI", Tahoma, Arial, sans-serif';
+    const rtl = containsArabic(text);
+
+    const measure = document.createElement('canvas');
+    const mctx = measure.getContext('2d');
+    mctx.font = `${bold ? 700 : 500} ${sizePx}px ${FONT}`;
+    const lines = wrapCanvasText(mctx, text, maxWpt * SCALE);
+    const lh = sizePx * 1.4;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(maxWpt * SCALE);
+    canvas.height = Math.ceil(lines.length * lh);
+    const ctx = canvas.getContext('2d');
+    ctx.textBaseline = 'top';
+    ctx.direction = rtl ? 'rtl' : 'ltr';
+    ctx.textAlign = align;
+    ctx.fillStyle = colorHex;
+    ctx.font = `${bold ? 700 : 500} ${sizePx}px ${FONT}`;
+    const drawX = align === 'center' ? canvas.width / 2 : (align === 'right' ? canvas.width : 0);
+    let py = 0;
+    lines.forEach(line => { ctx.fillText(line, drawX, py); py += lh; });
+
+    return { dataUrl: canvas.toDataURL('image/png'), widthPt: canvas.width / SCALE, heightPt: canvas.height / SCALE };
+  }
+
+  async function generatePDF(pdfData, meta) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4', compress: true });
+
+    const PAGE_W = 595.28, PAGE_H = 841.89;
+    const MARGIN = 50;
+    const CONTENT_W = PAGE_W - MARGIN * 2;
+    const FOOTER_Y = PAGE_H - 30;
+
+    const SIZES = {
+      TITLE_SIZE: 22, SUB_SIZE: 11, SECTION_SIZE: 15,
+      Q_SIZE: 12.5, OPT_SIZE: 11, RUNHEAD_SIZE: 9,
+    };
+    const Q_LH = SIZES.Q_SIZE * 1.5;
+    const OPT_LH = SIZES.OPT_SIZE * 1.55;
+
+    const runningHeaderText = [meta.subject, meta.topic].filter(Boolean).join('   •   ');
+
+    let y = MARGIN;
+    let pageNum = 1;
+
+    function drawRunningHeader() {
+      if (!runningHeaderText) { y = MARGIN; return; }
+      doc.setDrawColor(229, 231, 235);
+      if (isLatinSafe(runningHeaderText)) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(SIZES.RUNHEAD_SIZE);
+        doc.setTextColor(156, 163, 175);
+        doc.text(runningHeaderText, MARGIN, MARGIN, { baseline: 'top' });
+      } else {
+        const img = renderLineImage(runningHeaderText, SIZES.RUNHEAD_SIZE, true, '#9ca3af', CONTENT_W, 'left');
+        doc.addImage(img.dataUrl, 'PNG', MARGIN, MARGIN, img.widthPt, img.heightPt);
+      }
+      doc.setLineWidth(1);
+      doc.line(MARGIN, MARGIN + 24, PAGE_W - MARGIN, MARGIN + 24);
+      y = MARGIN + 24 + 20;
+    }
+
+    function drawFooter() {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(SIZES.RUNHEAD_SIZE);
+      doc.setTextColor(156, 163, 175);
+      doc.text(`${pageNum}`, PAGE_W / 2, FOOTER_Y, { align: 'center', baseline: 'alphabetic' });
+    }
+
+    function newPage() {
+      drawFooter();
+      doc.addPage();
+      pageNum += 1;
+      drawRunningHeader();
+    }
+
+    function ensureSpace(h) {
+      if (y + h > FOOTER_Y - 24) newPage();
+    }
+
+    // ── Title block (page 1 only) ──
+    const title = meta.topic || meta.subject || 'MCQs';
+    const subtitleParts = [meta.subject, meta.year, meta.foundation].filter(Boolean);
+    const subtitleText = subtitleParts.join('   •   ');
+
+    if (isLatinSafe(title)) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(SIZES.TITLE_SIZE);
+      doc.setTextColor(30, 58, 138);
+      doc.text(title, PAGE_W / 2, y, { align: 'center', baseline: 'top' });
+      y += SIZES.TITLE_SIZE * 1.5;
+    } else {
+      const img = renderLineImage(title, SIZES.TITLE_SIZE, true, '#1e3a8a', CONTENT_W, 'center');
+      doc.addImage(img.dataUrl, 'PNG', MARGIN, y, img.widthPt, img.heightPt);
+      y += img.heightPt + SIZES.TITLE_SIZE * 0.5;
+    }
+
+    if (subtitleText) {
+      if (isLatinSafe(subtitleText)) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(SIZES.SUB_SIZE);
+        doc.setTextColor(107, 114, 128);
+        doc.text(subtitleText, PAGE_W / 2, y, { align: 'center', baseline: 'top' });
+        y += SIZES.SUB_SIZE * 1.6;
+      } else {
+        const img = renderLineImage(subtitleText, SIZES.SUB_SIZE, false, '#6b7280', CONTENT_W, 'center');
+        doc.addImage(img.dataUrl, 'PNG', MARGIN, y, img.widthPt, img.heightPt);
+        y += img.heightPt + 6;
+      }
+    }
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(SIZES.RUNHEAD_SIZE);
+    doc.setTextColor(156, 163, 175);
+    doc.text(`Total Questions: ${pdfData.questions.length}`, PAGE_W / 2, y, { align: 'center', baseline: 'top' });
+    y += SIZES.RUNHEAD_SIZE * 1.8;
+
+    doc.setDrawColor(34, 197, 94);
+    doc.setLineWidth(2);
+    doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+    y += 22;
+
+    // ── Questions ──
+    for (let idx = 0; idx < pdfData.questions.length; idx++) {
+      const q = pdfData.questions[idx];
+      const qTextSafe = isLatinSafe(q.question || '');
+      const optsSafe = (q.options || []).every(o => isLatinSafe(o || ''));
+      const blockSafe = qTextSafe && optsSafe;
+
+      // Uploaded image dimensions (shared by both render paths).
+      let img = null, imgW = 0, imgH = 0;
+      if (q.image) {
+        try { img = await loadImageEl(q.image); } catch (e) { img = null; }
+        if (img) {
+          const maxW = Math.min(CONTENT_W, 260), maxH = 220;
+          const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+          imgW = Math.round(img.width * scale);
+          imgH = Math.round(img.height * scale);
+        }
+      }
+
+      if (blockSafe) {
+        // ── Native, selectable text path ──
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(SIZES.Q_SIZE);
+        const qText = `${idx + 1}. ${q.question || ''}`;
+        const qLines = doc.splitTextToSize(qText, CONTENT_W);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(SIZES.OPT_SIZE);
+        const optLines = (q.options || []).map((opt, i) =>
+          doc.splitTextToSize(`${LETTERS[i]}. ${opt || ''}`, CONTENT_W - 22)
+        );
+
+        let blockH = qLines.length * Q_LH + 12;
+        if (img) blockH += imgH + 14;
+        optLines.forEach(lines => { blockH += lines.length * OPT_LH + 6; });
+        blockH += 20;
+
+        ensureSpace(blockH);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(SIZES.Q_SIZE);
+        doc.setTextColor(30, 58, 138);
+        qLines.forEach(line => { doc.text(line, MARGIN, y, { baseline: 'top' }); y += Q_LH; });
+        y += 12;
+
+        if (img) {
+          const imgX = MARGIN + (CONTENT_W - imgW) / 2;
+          doc.addImage(q.image, imgFormatFromDataUrl(q.image), imgX, y, imgW, imgH);
+          y += imgH + 14;
+        }
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(SIZES.OPT_SIZE);
+        doc.setTextColor(55, 65, 81);
+        optLines.forEach(lines => {
+          lines.forEach(line => { doc.text(line, MARGIN + 22, y, { baseline: 'top' }); y += OPT_LH; });
+          y += 6;
+        });
+
+        y += 20;
+      } else {
+        // ── Non-Latin fallback: crisp rendered-image block ──
+        const block = renderQuestionBlockImage(idx, q, CONTENT_W, SIZES);
+        let blockH = block.heightPt;
+        if (img) blockH += imgH + 14;
+        blockH += 20;
+
+        ensureSpace(blockH);
+
+        doc.addImage(block.dataUrl, 'PNG', MARGIN, y, CONTENT_W, block.heightPt);
+        y += block.heightPt;
+
+        if (img) {
+          y += 14;
+          const imgX = MARGIN + (CONTENT_W - imgW) / 2;
+          doc.addImage(q.image, imgFormatFromDataUrl(q.image), imgX, y, imgW, imgH);
+          y += imgH;
+        }
+
+        y += 20;
+      }
+    }
+
+    // ── Answer key ──
+    ensureSpace(140);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(SIZES.SECTION_SIZE);
+    doc.setTextColor(30, 58, 138);
+    doc.text('Answer Key', PAGE_W / 2, y, { align: 'center', baseline: 'top' });
+    y += SIZES.SECTION_SIZE * 1.7;
+
+    const cols = 3;
+    const colW = CONTENT_W / cols;
+    const rows = Math.ceil(pdfData.questions.length / cols);
+    const rowH = SIZES.OPT_SIZE * 2;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(SIZES.RUNHEAD_SIZE);
+    doc.setTextColor(107, 114, 128);
+    for (let c = 0; c < cols; c++) {
+      doc.text('Q#', MARGIN + c * colW, y, { baseline: 'top' });
+      doc.text('Ans', MARGIN + c * colW + 50, y, { baseline: 'top' });
+    }
+    y += SIZES.RUNHEAD_SIZE * 2;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(SIZES.OPT_SIZE);
+    for (let r = 0; r < rows; r++) {
+      ensureSpace(rowH);
+      doc.setTextColor(17, 24, 39);
+      for (let c = 0; c < cols; c++) {
+        const qi = r * cols + c;
+        if (qi >= pdfData.questions.length) continue;
+        const q = pdfData.questions[qi];
+        doc.text(`${qi + 1}`, MARGIN + c * colW, y, { baseline: 'top' });
+        doc.text(`${q.correct || ''}`, MARGIN + c * colW + 50, y, { baseline: 'top' });
+      }
+      y += rowH;
+    }
+
+    drawFooter();
+    return doc.output('blob');
   }
 
   /* ── Build Bot-compatible JSON ────────────────────── */
@@ -1559,65 +1970,6 @@
   }
 
   /* ── Export Bot JSON ──────────────────────────────── */
-  async function exportSingleQuestion(id) {
-    const subject    = document.getElementById('meta-subject').value.trim();
-    const year       = document.getElementById('meta-year').value.trim();
-    const foundation = document.getElementById('meta-foundation').value.trim();
-    const topic      = document.getElementById('meta-topic').value.trim();
-    if (!subject || !year || !foundation || !topic) {
-      showToast('Fill Subject, Year, Foundation & Topic first!');
-      return;
-    }
-
-    const card = document.getElementById(`q-${id}`);
-    if (!card) return;
-    const qText = card.querySelector('.question-textarea').value.trim();
-    const options = Array.from(card.querySelectorAll('.option-input'))
-      .map(input => input.value.trim());
-    if (!qText) {
-      showToast('❌ Add the question text first');
-      return;
-    }
-    if (options.length < 2 || options.some(option => !option)) {
-      showToast('❌ Fill all options or remove the empty ones');
-      return;
-    }
-
-    const number = parseInt(card.querySelector('.q-number').textContent, 10) || id;
-    const imgEl = card.querySelector('.image-preview-wrap img');
-    const q = {
-      id: number,
-      question: qText,
-      options,
-      correct: card.dataset.correct || 'A',
-    };
-    if (imgEl && imgEl.src && imgEl.src.startsWith('data:')) q.image = imgEl.src;
-
-    if (needsImageRender(q)) {
-      showToast('🖼️ جاري تجهيز صورة النص…');
-      try {
-        q.poll_image = await generateQuestionImage(q);
-        q.poll_question = `Q${number}`;
-        q.poll_options = LETTERS.slice(0, q.options.length);
-      } catch (e) {
-        console.error('single question image generation failed', e);
-        showToast('❌ فشل إنشاء صورة السؤال');
-        return;
-      }
-    }
-
-    const data = { subject, year, foundation, topic, questions: [q] };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const slug = s => s.trim().replace(/\s+/g, '_');
-    const filename = `${slug(year)}_${slug(foundation)}_${slug(subject)}_${slug(topic)}_question_${number}.json`;
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    showToast(`✅ تم تنزيل JSON للسؤال ${number}`);
-  }
-
   // NOTE: already async (needed for Telegram sendDocument + image generation below).
   async function exportZIP() {
     const subject    = document.getElementById('meta-subject').value.trim();
@@ -1646,20 +1998,28 @@
       return;
     }
 
+    // Snapshot the FULL, untouched question data now — before the
+    // Telegram-limit image-render step below mutates `data` (it collapses
+    // long questions/options into "Q<n>" + image just for the JSON/bot).
+    // The PDF always uses this full text and is never subject to the
+    // 300/100-char Telegram limits.
+    const pdfData = JSON.parse(JSON.stringify(data));
+
     const modeEl = document.querySelector('input[name="export-mode"]:checked');
     const mode   = modeEl ? modeEl.value : 'download';
 
     // Any question whose text (or any option) exceeds Telegram's poll
-    // limits gets a separate, high-resolution text image. The real source
-    // fields remain untouched; only poll_* fields are added for delivery.
+    // limits gets rendered onto a white image instead — the poll question
+    // becomes "Q<n>" and the options collapse to plain letters (A, B, C…)
+    // so Telegram never truncates the real content.
     const toRender = data.questions.filter(needsImageRender);
     if (toRender.length > 0) {
       showToast(`🖼️ جاري تجهيز ${toRender.length} سؤال كصورة…`);
       for (const q of toRender) {
         try {
-          q.poll_image    = await generateQuestionImage(q);
-          q.poll_question = `Q${q.id}`;
-          q.poll_options  = LETTERS.slice(0, q.options.length);
+          q.image    = await generateQuestionImage(q);
+          q.question = `Q${q.id}`;
+          q.options  = LETTERS.slice(0, q.options.length);
         } catch (e) {
           console.error('generateQuestionImage failed for Q' + q.id, e);
           showToast(`❌ فشل إنشاء صورة للسؤال ${q.id}`);
@@ -1672,10 +2032,10 @@
     // since the block above already converts over-limit questions).
     let truncWarnings = [];
     data.questions.forEach(q => {
-      if (q.question.length > Q_LIMIT && !q.poll_question)
+      if (q.question.length > Q_LIMIT)
         truncWarnings.push(`Q${q.id}: question text exceeds ${Q_LIMIT} chars`);
       q.options.forEach((o, i) => {
-        if (o.length > OPT_LIMIT && !q.poll_options)
+        if (o.length > OPT_LIMIT)
           truncWarnings.push(`Q${q.id} option ${LETTERS[i]}: exceeds ${OPT_LIMIT} chars`);
       });
     });
@@ -1688,54 +2048,80 @@
     const slug     = s => s.trim().replace(/\s+/g, '_');
     const filename = `${slug(year)}_${slug(foundation)}_${slug(subject)}_${slug(topic)}.json`;
 
-    // ── Mode: download the JSON file only ──
+    // ── Build the PDF (always full text, unaffected by Telegram limits) ──
+    showToast('📄 جاري تجهيز ملف PDF…');
+    let pdfBlob;
+    try {
+      pdfBlob = await generatePDF(pdfData, { subject, year, foundation, topic });
+    } catch (e) {
+      console.error('PDF generation failed', e);
+      showToast('❌ فشل إنشاء ملف PDF');
+      return;
+    }
+    const pdfFilename = filename.replace(/\.json$/i, '.pdf');
+
+    // ── Mode: download both files ──
     if (mode === 'download') {
-      const a   = document.createElement('a');
-      a.href    = URL.createObjectURL(blob);
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      showToast(`✅ ${filename} downloaded`);
+      const a1 = document.createElement('a');
+      a1.href = URL.createObjectURL(blob);
+      a1.download = filename;
+      a1.click();
+      URL.revokeObjectURL(a1.href);
+
+      // Slight delay so the browser doesn't treat the 2nd download as a
+      // popup/spam and block it — this still fires from the same user
+      // gesture chain in every browser we've tested.
+      setTimeout(() => {
+        const a2 = document.createElement('a');
+        a2.href = URL.createObjectURL(pdfBlob);
+        a2.download = pdfFilename;
+        a2.click();
+        URL.revokeObjectURL(a2.href);
+      }, 350);
+
+      showToast(`✅ ${filename} و ${pdfFilename} اتنزلوا`);
       return;
     }
 
-    // ── Mode: share the file directly (any app — WhatsApp, Telegram, etc.) ──
-    // The processing above (image rendering) can take a moment, which makes
-    // strict browsers (esp. iOS Safari) invalidate the original click and
-    // reject navigator.share() with "Permission denied". So instead of
-    // sharing automatically, we show a confirm button — tapping IT is a
-    // fresh, direct user gesture that satisfies the browser's requirement.
+    // ── Mode: share both files together (any app — WhatsApp, Telegram, etc.) ──
+    // The processing above (image rendering / PDF build) can take a moment,
+    // which makes strict browsers (esp. iOS Safari) invalidate the original
+    // click and reject navigator.share() with "Permission denied". So
+    // instead of sharing automatically, we show a confirm button — tapping
+    // IT is a fresh, direct user gesture that satisfies the requirement.
     //
     // ALSO: Chromium only allows sharing files with a small allow-listed
-    // set of extensions (common audio/image/video/text types) — ".json" is
-    // NOT on that list, so navigator.share() rejects it with the same
+    // set of extensions (common audio/image/video/text/pdf types) — ".json"
+    // is NOT on that list, so navigator.share() rejects it with the same
     // "Permission denied" error no matter what. We work around this by
     // sharing the exact same JSON content under a ".txt" filename instead
     // (the content itself is untouched — still valid JSON, just with a
-    // ".txt" name/mimetype so Chrome agrees to share it). Download and Bot
-    // delivery still use the real ".json" filename, unaffected.
+    // ".txt" name/mimetype so Chrome agrees to share it). The PDF is shared
+    // as-is (".pdf" is already allow-listed). Download and Bot delivery
+    // still use the real ".json" filename, unaffected.
     if (mode === 'share') {
       if (!navigator.share) {
         showToast('❌ المتصفح ده مش بيدعم المشاركة أصلاً (جرب كروم/سفاري على الموبايل)');
         return;
       }
       const shareFilename = filename.replace(/\.json$/i, '.txt');
-      const file = new File([blob], shareFilename, { type: 'text/plain' });
-      const shareData = { files: [file] };
+      const jsonFile = new File([blob], shareFilename, { type: 'text/plain' });
+      const pdfFile  = new File([pdfBlob], pdfFilename, { type: 'application/pdf' });
+      const shareData = { files: [jsonFile, pdfFile] };
       if (!(navigator.canShare && navigator.canShare(shareData))) {
-        showToast('❌ المتصفح ده مش بيدعم مشاركة الملفات (جرب من الموبايل بدل الديسكتوب)');
+        showToast('❌ المتصفح ده مش بيدعم مشاركة الملفين مع بعض (جرب من الموبايل بدل الديسكتوب)');
         return;
       }
       window.__pendingShareData = shareData;
-      window.__pendingShareLabel = shareFilename;
+      window.__pendingShareLabel = `${shareFilename} + ${pdfFilename}`;
       openModal(`
         <div class="modal-header">
-          <span class="modal-title">الملف جاهز</span>
+          <span class="modal-title">الملفات جاهزة</span>
           <button class="modal-close" onclick="closeModal()">×</button>
         </div>
         <p style="font-size:13px;color:#374151;margin-bottom:16px;line-height:1.6;">
-          الملف <strong>${shareFilename}</strong> جاهز للمشاركة.<br>
-          <span style="color:#9ca3af;">(المحتوى JSON زي ما هو، الامتداد بس txt عشان كروم يسمح بالمشاركة)</span>
+          الملفين <strong>${shareFilename}</strong> و <strong>${pdfFilename}</strong> جاهزين للمشاركة سوا.<br>
+          <span style="color:#9ca3af;">(محتوى JSON زي ما هو، الامتداد بس txt عشان كروم يسمح بالمشاركة)</span>
         </p>
         <div style="display:flex;justify-content:flex-end;gap:8px;">
           <button class="modal-btn secondary" onclick="closeModal()">إلغاء</button>
@@ -1745,7 +2131,7 @@
       return;
     }
 
-    // ── Mode: send directly to the bot ──
+    // ── Mode: send both files directly to the bot ──
     const token  = document.getElementById('bot-token').value.trim();
     const chatId = document.getElementById('bot-chatid').value.trim();
     if (!token || !chatId) {
@@ -1753,17 +2139,19 @@
       return;
     }
     if (!navigator.onLine) {
-      showToast('❌ أنت أوفلاين — الملف مش هيتبعت للبوت');
+      showToast('❌ أنت أوفلاين — الملفات مش هتتبعت للبوت');
       return;
     }
 
-    showToast('📤 جاري الإرسال للبوت…');
+    showToast('📤 جاري إرسال الملفين للبوت…');
     try {
       const caption = `📁 *${filename}*\n📚 ${subject} | ${year} | ${foundation}\n📝 ${topic}\n❓ ${data.questions.length} سؤال`;
       await sendToBot(blob, filename, caption, token, chatId);
-      showToast(`✅ تم إرسال ${filename} للبوت`);
+      const pdfCaption = `📄 *${pdfFilename}*\nنسخة PDF كاملة (بدون أي اختصار في النص)`;
+      await sendToBot(pdfBlob, pdfFilename, pdfCaption, token, chatId);
+      showToast(`✅ تم إرسال ${filename} و ${pdfFilename} للبوت`);
     } catch (err) {
-      showToast('❌ فشل إرسال الملف للبوت — تأكد من التوكن و Chat ID');
+      showToast('❌ فشل إرسال الملفات للبوت — تأكد من التوكن و Chat ID');
       console.error('Telegram send error:', err);
     }
   }
